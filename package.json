@@ -1,12 +1,13 @@
 {
-  "name": "flower-transition",
+  "name": "pixelart",
   "private": true,
-  "version": "1.0.0",
-  "description": "Pixel-grid flower page transition for Framer",
+  "version": "2.0.0",
+  "description": "Turn an image into a moving pixel animation (X-ray, classic, photo styles) and export it as video or an embed",
   "scripts": {
-    "bake": "python3 -I tools/bake.py",
-    "build:demo": "esbuild demo/demo.tsx --bundle --minify --format=iife --target=es2019 --alias:framer=./demo/framer-stub.ts --define:process.env.NODE_ENV=\\\"production\\\" --outfile=demo/demo.js",
-    "typecheck": "tsc --noEmit"
+    "build": "node build.mjs",
+    "dev": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit -p .",
+    "legacy:build-demo": "esbuild legacy/page-transition/demo/demo.tsx --bundle --minify --format=iife --target=es2019 --alias:framer=./legacy/page-transition/demo/framer-stub.ts --define:process.env.NODE_ENV=\\\"production\\\" --outfile=legacy/page-transition/demo/demo.js"
   },
   "devDependencies": {
     "@types/react": "^18.3.0",

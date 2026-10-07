@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PixelArt</title>
+<meta name="description" content="Turn an image into a moving pixel animation and export it as video or an embed." />
+<style>
+  :root {
+    --bg: #0b0c0d;
+    --panel: #121416;
+    --line: #22262a;
+    --text: #e7ecee;
+    --muted: #8a949a;
+    --accent: #7fe3ee;
+    --accent-ink: #06181a;
+    --danger: #ff7b72;
+    --radius: 10px;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body, #root { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  button, input, select { font: inherit; color: inherit; }
+
+  .app { display: flex; flex-direction: column; height: 100%; }
+  .top { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; letter-spacing: .01em; }
+  .logo { width: 14px; height: 14px; display: inline-block;
+    background: conic-gradient(var(--accent) 0 25%, transparent 0 50%, var(--accent) 0 75%, transparent 0) 0 0 / 7px 7px; }
+  .file-name { flex: 1; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 320px; }
+  .stage-wrap { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 16px; gap: 12px; }
+  .stage-area { position: relative; flex: 1; min-height: 0; display: grid; place-items: center; }
+  .stage { position: relative; border-radius: 6px; overflow: hidden; box-shadow: 0 0 0 1px var(--line); }
+  .stage canvas { display: block; }
+  .stage.checker { background: repeating-conic-gradient(#1a1d20 0 25%, #121416 0 50%) 0 0 / 16px 16px; }
+  .drop-hint { position: absolute; inset: 0; display: grid; place-items: center; border: 2px dashed var(--accent);
+    border-radius: var(--radius); background: rgba(11, 12, 13, .7); color: var(--accent); font-size: 16px; pointer-events: none; }
+
+  .transport { display: flex; align-items: center; gap: 10px; }
+  .transport .scrub { flex: 1; }
+  .time { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 92px; text-align: right; }
+  .loop { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  .icon { width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); cursor: pointer; }
+  .icon:hover { border-color: #3a4147; }
+  .error { color: var(--danger); }
+
+  .panel { border-left: 1px solid var(--line); background: var(--panel); overflow: auto; padding: 4px 16px 24px; }
+  .section { padding: 14px 0; border-bottom: 1px solid var(--line); }
+  .section h2 { margin: 0 0 10px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  .row { display: grid; grid-template-columns: 96px 1fr auto; align-items: center; gap: 10px; min-height: 30px; }
+  .row-label { color: #c3cbcf; }
+  .row-control { display: flex; align-items: center; min-width: 0; }
+  .row output { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 44px; text-align: right; font-size: 12px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  select { width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 6px; }
+  .color { display: flex; align-items: center; gap: 8px; }
+  .color input[type=color] { width: 36px; height: 24px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: none; }
+  .chip { padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); background: none; color: var(--muted); cursor: pointer; font-size: 11px; }
+  .chip.on { border-color: var(--accent); color: var(--accent); }
+  .switch { appearance: none; width: 32px; height: 18px; border-radius: 999px; background: #2a3035; position: relative; cursor: pointer; margin: 0; }
+  .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #cfd6da; transition: transform .15s; }
+  .switch:checked { background: var(--accent); }
+  .switch:checked::after { transform: translateX(14px); background: var(--accent-ink); }
+
+  .segmented { display: flex; padding: 3px; gap: 3px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; }
+  .segmented button { flex: 1; padding: 5px 0; border: 0; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; }
+  .segmented button.on { background: #22282c; color: var(--text); }
+
+  .buttons { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  .buttons.grid { display: grid; grid-template-columns: 1fr 1fr; margin-top: 8px; }
+  .button { display: inline-flex; align-items: center; justify-content: center; padding: 7px 12px; border-radius: 8px;
+    border: 1px solid var(--line); background: #1a1e21; cursor: pointer; white-space: nowrap; }
+  .button:hover:not(:disabled) { border-color: #3a4147; }
+  .button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  .button.ghost { background: none; color: var(--muted); }
+  .button:disabled { opacity: .45; cursor: default; }
+  .reset { margin-top: 14px; width: 100%; }
+  .thumb { display: block; width: 100%; max-height: 180px; object-fit: contain; border-radius: 6px; background: var(--bg); margin-bottom: 6px; }
+  .hint { color: var(--muted); margin: 6px 0; font-size: 12px; }
+  .busy { display: flex; align-items: center; gap: 8px; color: var(--accent); margin-top: 6px; }
+  .bar { flex: 1; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+  .bar span { display: block; height: 100%; background: var(--accent); }
+
+  @media (max-width: 820px) {
+    .workspace { grid-template-columns: 1fr; grid-template-rows: minmax(260px, 55vh) auto; }
+    .panel { border-left: 0; border-top: 1px solid var(--line); overflow: visible; }
+    .app { height: auto; min-height: 100%; }
+    .top { padding: 10px 16px; }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="dist/app.js"></script>
+</body>
+</html>

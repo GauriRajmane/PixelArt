@@ -7,9 +7,9 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "lib": ["DOM", "ES2020"],
+    "lib": ["DOM", "DOM.Iterable", "ES2020"],
     "baseUrl": ".",
-    "paths": { "framer": ["demo/framer-stub.ts"] }
+    "paths": { "framer": ["legacy/page-transition/demo/framer-stub.ts"] }
   },
-  "include": ["FlowerTransition.tsx", "demo/*.ts", "demo/*.tsx"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "legacy/page-transition/FlowerTransition.tsx", "legacy/page-transition/demo/*.ts", "legacy/page-transition/demo/*.tsx"]
 }
