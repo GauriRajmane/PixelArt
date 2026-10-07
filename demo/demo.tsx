@@ -147,7 +147,9 @@ function App() {
                             <button onClick={outro}>Play outro</button>
                         </div>
                         <Slider label="Duration" value={s.duration} min={0.4} max={8} step={0.1} unit="s" onChange={set("duration")} />
-                        <Slider label="Fade" value={s.fadeDuration} min={0.1} max={2} step={0.05} unit="s" onChange={set("fadeDuration")} />
+                        <Slider label="Fill" value={s.fillDuration} min={0.1} max={2} step={0.05} unit="s" onChange={set("fillDuration")} />
+                        <Slider label="Pixel fade" value={s.fadeDuration} min={0.1} max={2} step={0.05} unit="s" onChange={set("fadeDuration")} />
+                        <Slider label="Fade pixels" value={s.pixelColumns} min={4} max={120} step={1} onChange={set("pixelColumns")} />
                         <label className="row">
                             <span>Style</span>
                             <select value={s.renderStyle} onChange={(e) => set("renderStyle")(e.target.value)}>

@@ -31,8 +31,12 @@ export type RenderStyle = "fine" | "classic"
 export interface FlowerSettings {
     /** Seconds the flower animation takes (the reference is time-scaled). */
     duration: number
-    /** Seconds for the overlay fade. */
+    /** Seconds for the pixel fade (blocks dissolving / appearing). */
     fadeDuration: number
+    /** Seconds for the cream to spread from the flower over the whole page. */
+    fillDuration: number
+    /** Block columns across the viewport for the pixel fade. */
+    pixelColumns: number
     /**
      * "fine": a dense halftone grid sampled from a smooth reconstruction of
      * the flower. "classic": the reference's coarse cells with outlines.
@@ -53,7 +57,9 @@ export interface FlowerSettings {
 
 export const DEFAULT_SETTINGS: FlowerSettings = {
     duration: 1.8,
-    fadeDuration: 0.5,
+    fadeDuration: 0.6,
+    fillDuration: 0.5,
+    pixelColumns: 24,
     renderStyle: "fine",
     cellColumns: 128,
     mobileColumns: 64,
@@ -1589,13 +1595,18 @@ class FlowerRenderer {
     private fineColors = new Map<number, string>()
     private bases: number[][] = []
     private bgRgb: number[] = [0, 0, 0]
+    // fill: per fine cell start delay (0..1), cached per key frame
+    private fillDelays = new Map<number, Float32Array>()
+    // pixel fade: random order per block
+    private blockOrder: Float32Array | null = null
+    private blockGrid = { cols: 0, rows: 0, size: 1, ox: 0, oy: 0 }
 
     constructor(
         private canvas: HTMLCanvasElement,
         private baked: Baked,
         private settings: FlowerSettings
     ) {
-        this.ctx = canvas.getContext("2d", { alpha: false })
+        this.ctx = canvas.getContext("2d")
         this.setSettings(settings)
     }
 
@@ -1647,6 +1658,169 @@ class FlowerRenderer {
         }
         this.fx = axis(this.w, SOURCE_CENTER_COL, b.cols)
         this.fy = axis(this.h, SOURCE_CENTER_ROW, b.rows)
+        this.fillDelays.clear()
+        // pixel-fade blocks (square, centred, covering the viewport)
+        const bcols = Math.max(2, this.settings.pixelColumns)
+        const size = this.w / bcols
+        const brows = Math.ceil(this.h / size)
+        const g = this.blockGrid
+        if (!this.blockOrder || g.cols !== bcols || g.rows !== brows) {
+            this.blockOrder = new Float32Array(bcols * brows)
+            for (let i = 0; i < this.blockOrder.length; i++) this.blockOrder[i] = Math.random()
+        }
+        this.blockGrid = { cols: bcols, rows: brows, size, ox: 0, oy: (this.h - brows * size) / 2 }
+    }
+
+    private keyPair(t: number): [number, number, number] {
+        const { times } = this.baked
+        let k = 0
+        while (k + 1 < times.length && times[k + 1] <= t) k++
+        const k2 = Math.min(times.length - 1, k + 1)
+        const span = times[k2] - times[k]
+        const u = span > 0 ? Math.max(0, Math.min(1, (t - times[k]) / span)) : 0
+        return [k, k2, u]
+    }
+
+    /** Sample the light field of key frame k at fine cell (i, j) into acc. */
+    private sample(m: Float32Array, i: number, j: number, acc: number[]) {
+        const fx = this.fx!,
+            fy = this.fy!
+        const cols = this.baked.cols
+        const io = i * 4,
+            jo = j * 4
+        acc[0] = acc[1] = acc[2] = acc[3] = 0
+        for (let a = 0; a < 4; a++) {
+            const wy = fy.wt[jo + a]
+            if (wy === 0) continue
+            const rowBase = fy.idx[jo + a] * cols
+            for (let c = 0; c < 4; c++) {
+                const w = wy * fx.wt[io + c]
+                const o = (rowBase + fx.idx[io + c]) * 4
+                acc[0] += w * m[o]
+                acc[1] += w * m[o + 1]
+                acc[2] += w * m[o + 2]
+                acc[3] += w * m[o + 3]
+            }
+        }
+    }
+
+    /**
+     * Fill timing for key frame k: cells inside the flower start first and
+     * the cream spreads outward by (chamfer) distance, with a little jitter
+     * so the front reads as pixels, not a smooth circle.
+     */
+    private delaysFor(k: number): Float32Array {
+        let d = this.fillDelays.get(k)
+        if (d) return d
+        const fx = this.fx!,
+            fy = this.fy!
+        const nx = fx.n,
+            ny = fy.n
+        const m = lightFields(this.baked)[k]
+        const dist = new Float32Array(nx * ny)
+        const acc = [0, 0, 0, 0]
+        for (let j = 0; j < ny; j++)
+            for (let i = 0; i < nx; i++) {
+                this.sample(m, i, j, acc)
+                const bright = (acc[0] + acc[1] + acc[2] + acc[3]) * fx.fade[i] * fy.fade[j]
+                dist[j * nx + i] = bright > 0.45 ? 0 : 1e9
+            }
+        // two-pass chamfer distance (1, 1.4)
+        const D = 1.4
+        for (let j = 0; j < ny; j++)
+            for (let i = 0; i < nx; i++) {
+                const o = j * nx + i
+                let v = dist[o]
+                if (i > 0) v = Math.min(v, dist[o - 1] + 1)
+                if (j > 0) {
+                    v = Math.min(v, dist[o - nx] + 1)
+                    if (i > 0) v = Math.min(v, dist[o - nx - 1] + D)
+                    if (i < nx - 1) v = Math.min(v, dist[o - nx + 1] + D)
+                }
+                dist[o] = v
+            }
+        for (let j = ny - 1; j >= 0; j--)
+            for (let i = nx - 1; i >= 0; i--) {
+                const o = j * nx + i
+                let v = dist[o]
+                if (i < nx - 1) v = Math.min(v, dist[o + 1] + 1)
+                if (j < ny - 1) {
+                    v = Math.min(v, dist[o + nx] + 1)
+                    if (i < nx - 1) v = Math.min(v, dist[o + nx + 1] + D)
+                    if (i > 0) v = Math.min(v, dist[o + nx - 1] + D)
+                }
+                dist[o] = v
+            }
+        let max = 0
+        for (let o = 0; o < dist.length; o++) if (dist[o] < 1e8 && dist[o] > max) max = dist[o]
+        d = new Float32Array(nx * ny)
+        for (let o = 0; o < dist.length; o++) {
+            const n = dist[o] > 1e8 ? 1 : max > 0 ? dist[o] / max : 0
+            // ease so the spread accelerates outward
+            d[o] = Math.min(1, Math.sqrt(n) * 0.85 + Math.random() * 0.15)
+        }
+        this.fillDelays.set(k, d)
+        return d
+    }
+
+    /** Cream squares growing over the flower: fill 0 (none) .. 1 (solid). */
+    private drawFill(t: number, fill: number) {
+        const ctx = this.ctx!
+        const [k, k2, u] = this.keyPair(t)
+        const d = this.delaysFor(u < 0.5 ? k : k2)
+        const fx = this.fx!,
+            fy = this.fy!
+        const pitch = this.fine
+        const SPAN = 0.35 // each cell grows over this share of the fill
+        ctx.fillStyle = this.settings.creamColor
+        ctx.beginPath()
+        for (let j = 0; j < fy.n; j++) {
+            const cy = fy.off + (j + 0.5) * pitch
+            for (let i = 0; i < fx.n; i++) {
+                const local = (fill - d[j * fx.n + i] * (1 - SPAN)) / SPAN
+                if (local <= 0) continue
+                const cx = fx.off + (i + 0.5) * pitch
+                if (local >= 0.85) {
+                    // nearly full cells snap to exact tiles so no 1px seams
+                    // show between neighbours (and the end state is solid)
+                    const x = Math.floor(fx.off + i * pitch),
+                        y = Math.floor(fy.off + j * pitch)
+                    ctx.rect(x, y, Math.ceil(fx.off + (i + 1) * pitch) - x, Math.ceil(fy.off + (j + 1) * pitch) - y)
+                    continue
+                }
+                // slight overshoot so a growing square meets its full
+                // neighbours without a hairline gap
+                const hs = (pitch / 2) * 1.08 * smooth(local / 0.85)
+                if (hs < 0.4) continue
+                const x = Math.round(cx - hs),
+                    y = Math.round(cy - hs)
+                ctx.rect(x, y, Math.max(1, Math.round(cx + hs) - x), Math.max(1, Math.round(cy + hs) - y))
+            }
+        }
+        ctx.fill()
+    }
+
+    /**
+     * Pixel fade over a transparent canvas: cream blocks visible when their
+     * random rank is above (out) / below (in) the progress p.
+     */
+    drawPixels(p: number, dir: "in" | "out") {
+        const ctx = this.ctx
+        if (!ctx || !this.blockOrder) return
+        const g = this.blockGrid
+        ctx.clearRect(0, 0, this.w, this.h)
+        ctx.fillStyle = this.settings.creamColor
+        ctx.beginPath()
+        for (let j = 0; j < g.rows; j++)
+            for (let i = 0; i < g.cols; i++) {
+                const r = this.blockOrder[j * g.cols + i]
+                const on = dir === "out" ? r >= p : r < p
+                if (!on) continue
+                const x = Math.floor(g.ox + i * g.size),
+                    y = Math.floor(g.oy + j * g.size)
+                ctx.rect(x, y, Math.ceil(g.ox + (i + 1) * g.size) - x, Math.ceil(g.oy + (j + 1) * g.size) - y)
+            }
+        ctx.fill()
     }
 
     private fineColor(key: number): string {
@@ -1745,18 +1919,26 @@ class FlowerRenderer {
         })
     }
 
-    /** Draw the animation at `t` seconds of the baked (source) timeline. */
-    draw(t: number) {
+    /**
+     * Draw the animation at `t` seconds of the baked (source) timeline, with
+     * the cream fill (0..1) spreading from the flower on top.
+     */
+    draw(t: number, fill = 0) {
+        if (!this.ctx) return
+        if (fill >= 1) {
+            this.ctx.fillStyle = this.settings.creamColor
+            this.ctx.fillRect(0, 0, this.w, this.h)
+            return
+        }
+        this.drawFlower(t)
+        if (fill > 0) this.drawFill(t, fill)
+    }
+
+    private drawFlower(t: number) {
         const ctx = this.ctx
         if (!ctx) return
         const b = this.baked
-        const { times } = b
-        // key frame pair around t
-        let k = 0
-        while (k + 1 < times.length && times[k + 1] <= t) k++
-        const k2 = Math.min(times.length - 1, k + 1)
-        const span = times[k2] - times[k]
-        const u = span > 0 ? Math.max(0, Math.min(1, (t - times[k]) / span)) : 0
+        const [k, k2, u] = this.keyPair(t)
         if (this.settings.renderStyle !== "classic") return this.drawFine(k, k2, u)
         const cA = b.counts[k],
             rA = b.runs[k],
@@ -1865,13 +2047,18 @@ const smooth = (x: number) => {
     return c * c * (3 - 2 * c)
 }
 
+type PhaseKind = "pixelIn" | "unfill" | "play" | "fill" | "pixelOut" | "fadeIn" | "fadeOut"
+
 /**
  * Run one transition on `root` (the overlay element, already covering the
  * viewport) drawing into `canvas`. Returns a cancel function.
  *
- *  intro   play, fade out (starts slightly before the end), complete
- *  outro   fade in, play, complete (overlay stays opaque)
- *  reveal  overlay already opaque at the rest pose: fade out, complete
+ *  intro   play the flower, the cream spreads over the page, pixel fade out
+ *  outro   cream blocks pixel in over the page, the cream shrinks back into
+ *          the flower, play; complete (overlay stays covering the page)
+ *  reveal  continues an outro after navigation: cream fill, pixel fade out
+ *
+ * With prefers-reduced-motion every mode is a plain short opacity fade.
  */
 export function runTransition(
     root: HTMLElement,
@@ -1882,17 +2069,37 @@ export function runTransition(
     let raf = 0
     let renderer: FlowerRenderer | null = null
     const reduced = opts.reducedMotion ?? prefersReducedMotion()
-    const duration = Math.max(0.05, opts.duration)
-    const fade = Math.max(0.05, reduced ? 0.25 : opts.fadeDuration)
     const mode = opts.mode
+    const play = Math.max(0.05, opts.duration)
+    const fill = Math.max(0.05, opts.fillDuration)
+    const fade = Math.max(0.05, opts.fadeDuration)
 
-    // overlap the fade with the end of the play so it reads as one motion
-    const overlap = Math.min(fade * 0.5, duration * 0.3)
-    const playStart = mode === "outro" ? fade * 0.6 : 0
+    const phases: { kind: PhaseKind; dur: number }[] = reduced
+        ? [{ kind: mode === "outro" ? "fadeIn" : "fadeOut", dur: 0.25 }]
+        : mode === "intro"
+          ? [
+                { kind: "play", dur: play },
+                { kind: "fill", dur: fill },
+                { kind: "pixelOut", dur: fade },
+            ]
+          : mode === "outro"
+            ? [
+                  { kind: "pixelIn", dur: fade },
+                  { kind: "unfill", dur: fill },
+                  { kind: "play", dur: play },
+              ]
+            : [
+                  { kind: "fill", dur: fill },
+                  { kind: "pixelOut", dur: fade },
+              ]
+    const total = phases.reduce((a, p) => a + p.dur, 0)
 
+    // An intro is opaque (background colour) from its first paint; an outro
+    // starts invisible and builds up over the page.
     root.style.opacity = mode === "outro" ? "0" : "1"
     root.style.pointerEvents = "auto"
     root.style.display = "block"
+    if (mode !== "outro") root.style.background = opts.background
 
     const onResize = () => renderer?.resize()
     window.addEventListener("resize", onResize)
@@ -1909,42 +2116,66 @@ export function runTransition(
 
     const start = (baked: Baked | null) => {
         if (cancelled) return
-        if (baked && !reduced) {
-            renderer = new FlowerRenderer(canvas, baked, opts)
+        const animated = !!baked && !reduced
+        if (animated) {
+            renderer = new FlowerRenderer(canvas, baked!, opts)
             canvas.style.visibility = "visible"
         } else {
-            canvas.style.visibility = "hidden" // plain background fade
+            // plain opacity fade of the background colour
+            canvas.style.visibility = "hidden"
+            root.style.background = opts.background
         }
+        const end = baked ? baked.duration : 0
         const t0 = performance.now()
+        let first = true
         const frame = (now: number) => {
             if (cancelled) return
             const e = (now - t0) / 1000
-            let opacity = 1
-            let play = 0 // 0..1 progress through the animation
-            let done = false
-            if (reduced) {
-                opacity = mode === "outro" ? smooth(e / fade) : 1 - smooth(e / fade)
-                done = e >= fade
-            } else if (mode === "intro") {
-                const fadeStart = duration - overlap
-                play = e / duration
-                opacity = 1 - smooth((e - fadeStart) / fade)
-                done = e >= fadeStart + fade
-            } else if (mode === "outro") {
-                opacity = smooth(e / fade)
-                play = (e - playStart) / duration
-                done = e >= playStart + duration
+            // current phase and its local progress
+            let acc = 0
+            let ph = phases[phases.length - 1]
+            let p = 1
+            for (const x of phases) {
+                if (e < acc + x.dur) {
+                    ph = x
+                    p = (e - acc) / x.dur
+                    break
+                }
+                acc += x.dur
+            }
+            p = Math.max(0, Math.min(1, p))
+
+            if (!animated) {
+                root.style.opacity = String(ph.kind === "fadeIn" ? smooth(p) : 1 - smooth(p))
             } else {
-                play = 1
-                opacity = 1 - smooth(e / fade)
-                done = e >= fade
+                const r = renderer!
+                switch (ph.kind) {
+                    case "play":
+                        r.draw(p * end)
+                        break
+                    case "fill":
+                        // the flower holds its last pose while the cream spreads
+                        r.draw(mode === "outro" ? 0 : end, p)
+                        break
+                    case "unfill":
+                        r.draw(0, 1 - p)
+                        break
+                    case "pixelIn":
+                        r.drawPixels(p, "in")
+                        break
+                    case "pixelOut":
+                        r.drawPixels(p, "out")
+                        break
+                }
+                if (first) {
+                    // the canvas now paints everything; let the page show
+                    // through wherever it is transparent (pixel phases)
+                    root.style.background = "transparent"
+                    root.style.opacity = "1"
+                    first = false
+                }
             }
-            root.style.opacity = String(opacity)
-            if (renderer && baked) {
-                const p = Math.max(0, Math.min(1, play))
-                renderer.draw(p * baked.duration)
-            }
-            if (done) finish()
+            if (e >= total) finish()
             else raf = requestAnimationFrame(frame)
         }
         raf = requestAnimationFrame(frame)
@@ -2103,6 +2334,8 @@ export default function FlowerTransition(props: Props) {
     const settings: FlowerSettings = {
         duration: p.duration,
         fadeDuration: p.fadeDuration,
+        fillDuration: p.fillDuration,
+        pixelColumns: p.pixelColumns,
         renderStyle: p.renderStyle,
         cellColumns: p.cellColumns,
         mobileColumns: p.mobileColumns,
@@ -2254,14 +2487,34 @@ addPropertyControls(FlowerTransition, {
         step: 0.1,
         unit: "s",
     },
+    fillDuration: {
+        type: ControlType.Number,
+        title: "Fill",
+        defaultValue: DEFAULT_SETTINGS.fillDuration,
+        min: 0.1,
+        max: 2,
+        step: 0.05,
+        unit: "s",
+        description: "Cream spreading from the flower over the page.",
+    },
     fadeDuration: {
         type: ControlType.Number,
-        title: "Fade",
+        title: "Pixel Fade",
         defaultValue: DEFAULT_SETTINGS.fadeDuration,
         min: 0.1,
         max: 2,
         step: 0.05,
         unit: "s",
+    },
+    pixelColumns: {
+        type: ControlType.Number,
+        title: "Fade Pixels",
+        defaultValue: DEFAULT_SETTINGS.pixelColumns,
+        min: 4,
+        max: 120,
+        step: 1,
+        displayStepper: true,
+        description: "Block columns across the screen for the pixel fade.",
     },
     renderStyle: {
         type: ControlType.Enum,

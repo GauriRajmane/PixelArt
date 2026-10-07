@@ -1,13 +1,24 @@
 # PixelArt: Flower page transition for Framer
 
 A pixel-grid flower (cream cells, red/yellow/blue fringes, dotted halo) that
-plays full screen as a page transition, then fades out to reveal the page.
+plays full screen as a page transition. The flower's cream then spreads until
+it covers the whole screen, and the cream breaks into square blocks that
+disappear in random order to reveal the page (a "pixel fade").
+
+The sequence:
+
+- **Intro** (page load): flower plays → **fill** (cream spreads out from
+  the flower over the page) → **pixel fade out** (blocks vanish at random,
+  revealing the page).
+- **Outro** (link click): **pixel fade in** (cream blocks pop in over the
+  current page) → **unfill** (cream shrinks back into the flower) → flower
+  plays → navigate → fill → pixel fade out on the new page.
 
 | File | What it is |
 | --- | --- |
 | `FlowerTransition.tsx` | The Framer code component. Self-contained: imports only `react` and `framer`, with the baked animation inlined (~130 KB base64, ~100 KB gzipped). Also exports the link override and a few helpers. |
 | `FlowerTransitionOverrides.tsx` | The `withFlowerTransition` code override for nav links. |
-| `demo.html` + `demo/` | Standalone preview with replay/outro buttons, sliders for duration, fade, columns and colours, a scrubber, and an FPS readout. |
+| `demo.html` + `demo/` | Standalone preview with replay/outro buttons, sliders for timing, columns and colours, a scrubber, and an FPS readout. |
 | `tools/bake.py` | Turns the reference frames into the per-cell data and injects it into `FlowerTransition.tsx`. |
 | `data/` | The same baked data as files (`flower-frames.bin.gz` + `flower-frames.json`). |
 
@@ -45,11 +56,13 @@ Properties:
 
 | Control | Default | Notes |
 | --- | --- | --- |
-| Direction | Intro | **Intro**: plays, then fades out to reveal the page. **Outro**: fades in over the page, plays, fires *On Complete*, and stays covering the page. |
+| Direction | Intro | **Intro**: flower, fill, pixel fade out to reveal the page. **Outro**: pixel fade in over the page, unfill into the flower, play, fire *On Complete*, and stay covering the page. |
 | Auto Play | on | When off, the component waits for `triggerFlowerTransition()` (exported) or a `flowertransition:play` event on `window`. |
 | Once / Session | off | Intro only. Plays on the first page view of the browser session (`sessionStorage`, wrapped in try/catch). |
 | Duration | 1.8 s | Length of the flower animation. The ~6 s reference (rest, push-in, sweep, rest) is time-scaled to fit, not cut. |
-| Fade | 0.5 s | The fade-out starts slightly before the animation ends so the two overlap. |
+| Fill | 0.5 s | How long the cream takes to spread from the flower over the whole page. Each grid cell grows into a solid square, starting with the ones in the flower and moving outward by distance with a little random jitter. |
+| Pixel Fade | 0.6 s | How long the blocks take to disappear (intro) or appear (outro). Each block switches at its own random moment, instantly rather than fading. |
+| Fade Pixels | 24 | Block columns across the screen for the pixel fade. The blocks are square. Lower numbers give chunkier blocks. |
 | Style | Fine | **Fine (halftone)**: a dense grid of small square dots, sized by brightness, sampled from a smooth reconstruction of the flower (see *Fine style* below). **Classic**: the reference's coarse cells (~56 across) with their outlines and hollow halo squares. |
 | Columns | 128 | Fine style: dot columns across the viewport in landscape. Dots stay square and their size follows the viewport width. Higher means smaller, more numerous dots. |
 | Columns (Portrait) | 64 | Fine style: dot columns when the viewport is taller than it is wide. |
@@ -70,12 +83,14 @@ On click the override:
 1. Stops Framer's own link handling. It uses a capture-phase listener and
    leaves modified clicks (⌘/Ctrl/Shift), `target="_blank"`, other-origin
    links and same-page `#hash` links alone.
-2. Fades the flower overlay in over the current page and plays the animation.
+2. Pixel-fades cream blocks in over the current page, shrinks the cream back
+   into the flower, and plays the animation.
 3. Navigates with Framer's router: `useRouter()` from `framer`, finding the
    route whose `path` matches the link and calling `navigate(routeId)`. If no
    route matches, or the router isn't available, it falls back to
    `location.assign()`.
-4. Fades the overlay out to reveal the new page. The destination page's
+4. Spreads the cream over the screen again and pixel-fades it out to reveal
+   the new page. The destination page's
    FlowerTransition intro notices this handoff and doesn't play a second
    time.
 
@@ -118,7 +133,8 @@ Open `demo.html` directly in a browser. No server is needed.
 
 - **Replay intro** / **Play outro** buttons. The outro also switches the fake
   page between "Home" and "About" to show the navigate-and-reveal step.
-- A style switch (Fine / Classic), sliders for duration, fade, columns
+- A style switch (Fine / Classic), sliders for duration, fill, pixel fade,
+  fade pixels, columns
   (landscape and portrait) and dot size, and colour pickers.
 - A **scrubber** that draws any moment of the baked animation, useful for
   comparing against the reference frames.
