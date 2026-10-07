@@ -50,8 +50,10 @@ Properties:
 | Once / Session | off | Intro only. Plays on the first page view of the browser session (`sessionStorage`, wrapped in try/catch). |
 | Duration | 1.8 s | Length of the flower animation. The ~6 s reference (rest, push-in, sweep, rest) is time-scaled to fit, not cut. |
 | Fade | 0.5 s | The fade-out starts slightly before the animation ends so the two overlap. |
-| Columns | 56 | Columns across the viewport in landscape. Cells stay square and their size follows the viewport width. The reference grid is ~56 columns wide. |
-| Columns (Portrait) | 30 | Used when the viewport is taller than it is wide, so the flower isn't tiny on phones. |
+| Style | Fine | **Fine (halftone)**: a dense grid of small square dots, sized by brightness, sampled from a smooth reconstruction of the flower (see *Fine style* below). **Classic**: the reference's coarse cells (~56 across) with their outlines and hollow halo squares. |
+| Columns | 128 | Fine style: dot columns across the viewport in landscape. Dots stay square and their size follows the viewport width. Higher means smaller, more numerous dots. |
+| Columns (Portrait) | 64 | Fine style: dot columns when the viewport is taller than it is wide. |
+| Dot Size | 0.82 | Fine style: the largest dot as a fraction of the grid pitch. Lower opens up the gaps between dots. |
 | Background, Cream, Red, Yellow, Blue | `#08080C`, `#E8E8D8`, `#F80000`, `#F8C048`, `#1F3FFF` | Every shade in the animation (outlines, dark reds, tan blends) is a mix of these, so recolouring stays consistent. |
 | On Complete | | Fires when the transition finishes. |
 
@@ -116,8 +118,8 @@ Open `demo.html` directly in a browser. No server is needed.
 
 - **Replay intro** / **Play outro** buttons. The outro also switches the fake
   page between "Home" and "About" to show the navigate-and-reveal step.
-- Sliders for duration, fade, columns (landscape and portrait), and colour
-  pickers.
+- A style switch (Fine / Classic), sliders for duration, fade, columns
+  (landscape and portrait) and dot size, and colour pickers.
 - A **scrubber** that draws any moment of the baked animation, useful for
   comparing against the reference frames.
 
@@ -171,13 +173,38 @@ How the bake works:
     cells under it are filled from the nearest frame where they are
     uncovered.
 
+## Fine style
+
+The baked data only holds the reference's coarse grid (57 × 30 cells), so
+simply drawing smaller cells would only repeat the same blocks. The fine style
+instead:
+
+1. Turns each key frame into a smooth **light field**. For every coarse cell,
+   it takes the area of each concentric square times that square's colour
+   weights, giving how much cream, yellow, red and blue light the cell holds.
+2. Interpolates the field between key frames, so the motion is continuous.
+3. Samples it with bicubic (Catmull-Rom) interpolation at the centre of every
+   fine dot.
+4. Sizes each dot so its area matches the sampled brightness (a halftone).
+   Its colour is the dominant mix of the base colours; the weights are cubed
+   so the fringes stay saturated instead of blending into pastels.
+
+Edges become smooth curves of shrinking dots, like the references. The thin
+outlines and hollow halo squares of the reference only exist in the Classic
+style.
+
+The framing (how big the flower is on screen) is the same in both styles:
+about 56 reference cells across in landscape and 30 in portrait. Columns only
+changes the dot density.
+
 ## Rendering notes
 
 - One `<canvas>`, sized to the viewport × `devicePixelRatio` (capped at 2).
   Rectangles are snapped to device pixels.
-- Cells are batched by layer and colour (at most 4 × 15 `fill()` calls per
-  frame), so a full screen of ~2,000 cells stays at 60 fps on laptops and
-  phones.
+- Rectangles are batched by colour, giving a few dozen `fill()` calls per
+  frame. Classic draws ~2,000 cells and Fine ~10,000 dots at the defaults. The
+  sampling taps are precomputed per column and row on resize, so the per-frame
+  JS cost is a few milliseconds.
 - Viewports with a different aspect ratio than the reference are centred.
   Beyond the baked area, edge cells keep going and shrink over 4 cells, which
   continues the dotted fall-off instead of leaving a hard edge.

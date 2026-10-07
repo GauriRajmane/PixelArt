@@ -148,8 +148,17 @@ function App() {
                         </div>
                         <Slider label="Duration" value={s.duration} min={0.4} max={8} step={0.1} unit="s" onChange={set("duration")} />
                         <Slider label="Fade" value={s.fadeDuration} min={0.1} max={2} step={0.05} unit="s" onChange={set("fadeDuration")} />
-                        <Slider label="Columns" value={s.cellColumns} min={20} max={120} step={1} onChange={set("cellColumns")} />
-                        <Slider label="Portrait cols" value={s.mobileColumns} min={12} max={80} step={1} onChange={set("mobileColumns")} />
+                        <label className="row">
+                            <span>Style</span>
+                            <select value={s.renderStyle} onChange={(e) => set("renderStyle")(e.target.value)}>
+                                <option value="fine">Fine (halftone)</option>
+                                <option value="classic">Classic (reference cells)</option>
+                            </select>
+                            <output />
+                        </label>
+                        <Slider label="Columns" value={s.cellColumns} min={40} max={260} step={1} onChange={set("cellColumns")} />
+                        <Slider label="Portrait cols" value={s.mobileColumns} min={20} max={160} step={1} onChange={set("mobileColumns")} />
+                        <Slider label="Dot size" value={s.dotSize} min={0.3} max={1} step={0.01} onChange={set("dotSize")} />
                         <Color label="Background" value={s.background} onChange={set("background")} />
                         <Color label="Cream" value={s.creamColor} onChange={set("creamColor")} />
                         <Color label="Red" value={s.redColor} onChange={set("redColor")} />
@@ -167,3 +176,8 @@ function App() {
 }
 
 createRoot(document.getElementById("root")!).render(<App />)
+
+// handy for screenshots / debugging from the console:
+// __drawStill(canvas, progress 0..1, { renderStyle: "classic" })
+;(window as any).__drawStill = (c: HTMLCanvasElement, p: number, o: Partial<FlowerSettings> = {}) =>
+    drawStill(c, { ...DEFAULT_SETTINGS, ...o }, p)

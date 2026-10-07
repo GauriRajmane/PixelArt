@@ -26,16 +26,24 @@ import { addPropertyControls, ControlType, RenderTarget } from "framer"
 // ---------------------------------------------------------------------------
 
 export type Direction = "intro" | "outro"
+export type RenderStyle = "fine" | "classic"
 
 export interface FlowerSettings {
     /** Seconds the flower animation takes (the reference is time-scaled). */
     duration: number
     /** Seconds for the overlay fade. */
     fadeDuration: number
-    /** Columns across the viewport in landscape. */
+    /**
+     * "fine": a dense halftone grid sampled from a smooth reconstruction of
+     * the flower. "classic": the reference's coarse cells with outlines.
+     */
+    renderStyle: RenderStyle
+    /** Pixel columns across the viewport in landscape (fine style). */
     cellColumns: number
-    /** Columns across the viewport in portrait (phones). */
+    /** Pixel columns across the viewport in portrait (fine style). */
     mobileColumns: number
+    /** Largest dot as a fraction of the grid pitch (fine style). */
+    dotSize: number
     background: string
     creamColor: string
     redColor: string
@@ -46,8 +54,10 @@ export interface FlowerSettings {
 export const DEFAULT_SETTINGS: FlowerSettings = {
     duration: 1.8,
     fadeDuration: 0.5,
-    cellColumns: 56,
-    mobileColumns: 30,
+    renderStyle: "fine",
+    cellColumns: 128,
+    mobileColumns: 64,
+    dotSize: 0.82,
     background: "#08080C",
     creamColor: "#E8E8D8",
     redColor: "#F80000",
@@ -1400,6 +1410,9 @@ const BAKED_GZ_BASE64 =
 /** Centre of the reference frame, in baked cell coordinates. */
 const SOURCE_CENTER_COL = 28.05
 const SOURCE_CENTER_ROW = 15.04
+/** Framing: reference cells across the viewport (landscape / portrait). */
+const SCENE_COLUMNS = 56
+const SCENE_COLUMNS_PORTRAIT = 30
 
 interface Baked {
     cols: number
@@ -1413,6 +1426,52 @@ interface Baked {
     runs: Uint8Array[]
     /** per palette entry: weights of [cream, yellow, red, blue] over bg */
     palette: number[][]
+    /** per key frame: smooth light field, 4 weights per cell (lazy) */
+    fields?: Float32Array[]
+}
+
+/**
+ * Light field of every key frame: for each cell, the area-weighted mix of
+ * cream / yellow / red / blue its squares contain (0..1 each). This is what
+ * the fine style resamples onto a denser grid.
+ */
+function lightFields(b: Baked): Float32Array[] {
+    if (b.fields) return b.fields
+    const cells = b.cols * b.rows
+    b.fields = b.counts.map((counts, k) => {
+        const runs = b.runs[k]
+        const f = new Float32Array(cells * 4)
+        for (let i = 0; i < cells; i++) {
+            const n = counts[i]
+            for (let q = 0; q < n; q++) {
+                const v = runs[i * 4 + q]
+                const R = ((v >> 4) + 1) / b.rings
+                const Rin = q + 1 < n ? ((runs[i * 4 + q + 1] >> 4) + 1) / b.rings : 0
+                const area = R * R - Rin * Rin
+                const w = b.palette[v & 15]
+                if (!w) continue
+                for (let c = 0; c < 4; c++) f[i * 4 + c] += area * (w[c] || 0)
+            }
+        }
+        return f
+    })
+    return b.fields
+}
+
+/** Catmull-Rom taps for sampling a grid of `n` cells at coordinate `g`. */
+function cubicTaps(g: number, n: number, idx: Int32Array, wt: Float32Array, o: number) {
+    const i = Math.floor(g)
+    const t = g - i
+    const t2 = t * t,
+        t3 = t2 * t
+    wt[o] = (-t3 + 2 * t2 - t) / 2
+    wt[o + 1] = (3 * t3 - 5 * t2 + 2) / 2
+    wt[o + 2] = (-3 * t3 + 4 * t2 + t) / 2
+    wt[o + 3] = (t3 - t2) / 2
+    for (let k = 0; k < 4; k++) {
+        const j = i - 1 + k
+        idx[o + k] = j < 0 ? 0 : j >= n ? n - 1 : j
+    }
 }
 
 let bakedPromise: Promise<Baked | null> | null = null
@@ -1519,8 +1578,17 @@ class FlowerRenderer {
     private h = 0
     private dpr = 1
     private cell = 1
+    private fine = 1
     // rect batches: [layer][palette] -> flat x,y,w,h list
     private batches: number[][][] = []
+    // fine style: sampling taps per column / row, colour batches
+    private fx: { n: number; off: number; idx: Int32Array; wt: Float32Array; fade: Float32Array } | null = null
+    private fy: { n: number; off: number; idx: Int32Array; wt: Float32Array; fade: Float32Array } | null = null
+    private mix: Float32Array | null = null
+    private fineBatches = new Map<number, number[]>()
+    private fineColors = new Map<number, string>()
+    private bases: number[][] = []
+    private bgRgb: number[] = [0, 0, 0]
 
     constructor(
         private canvas: HTMLCanvasElement,
@@ -1535,6 +1603,9 @@ class FlowerRenderer {
         this.settings = s
         this.colors = paletteColors(this.baked, s)
         this.bg = s.background
+        this.bgRgb = parseColor(s.background)
+        this.bases = [s.creamColor, s.yellowColor, s.redColor, s.blueColor].map(parseColor)
+        this.fineColors.clear()
         this.batches = []
         for (let l = 0; l < MAX_RUNS; l++)
             this.batches.push(this.colors.map(() => [] as number[]))
@@ -1551,11 +1622,127 @@ class FlowerRenderer {
         if (this.canvas.width !== this.w) this.canvas.width = this.w
         if (this.canvas.height !== this.h) this.canvas.height = this.h
         const portrait = h > w
+        this.cell = this.w / (portrait ? SCENE_COLUMNS_PORTRAIT : SCENE_COLUMNS)
         const cols = Math.max(
-            4,
+            8,
             portrait ? this.settings.mobileColumns : this.settings.cellColumns
         )
-        this.cell = this.w / cols
+        this.fine = this.w / cols
+        // taps for every fine column / row (positions only change on resize)
+        const b = this.baked
+        const axis = (len: number, centre: number, n: number) => {
+            const count = Math.ceil(len / this.fine)
+            const off = (len - count * this.fine) / 2
+            const idx = new Int32Array(count * 4)
+            const wt = new Float32Array(count * 4)
+            const fade = new Float32Array(count)
+            for (let i = 0; i < count; i++) {
+                const px = off + (i + 0.5) * this.fine
+                const g = (px - len / 2) / this.cell + centre - 0.5
+                cubicTaps(g, n, idx, wt, i * 4)
+                const d = g < 0 ? -g : g > n - 1 ? g - (n - 1) : 0
+                fade[i] = Math.max(0, 1 - d / EDGE_FADE_CELLS)
+            }
+            return { n: count, off, idx, wt, fade }
+        }
+        this.fx = axis(this.w, SOURCE_CENTER_COL, b.cols)
+        this.fy = axis(this.h, SOURCE_CENTER_ROW, b.rows)
+    }
+
+    private fineColor(key: number): string {
+        let c = this.fineColors.get(key)
+        if (c) return c
+        const p = [Math.floor(key / 729) % 9, Math.floor(key / 81) % 9, Math.floor(key / 9) % 9, key % 9]
+        const sum = p[0] + p[1] + p[2] + p[3] || 1
+        const rgb = [0, 1, 2].map((ch) => {
+            let v = 0
+            for (let i = 0; i < 4; i++) v += (p[i] / sum) * this.bases[i][ch]
+            return Math.round(Math.max(0, Math.min(255, v)))
+        })
+        c = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`
+        this.fineColors.set(key, c)
+        return c
+    }
+
+    /** Fine style: halftone squares sampled from the smooth light field. */
+    private drawFine(k: number, k2: number, u: number) {
+        const ctx = this.ctx!
+        const b = this.baked
+        const fields = lightFields(b)
+        const A = fields[k],
+            B = fields[k2]
+        if (!this.mix || this.mix.length !== A.length) this.mix = new Float32Array(A.length)
+        const m = this.mix
+        for (let i = 0; i < m.length; i++) m[i] = A[i] + (B[i] - A[i]) * u
+
+        const fx = this.fx!,
+            fy = this.fy!
+        const pitch = this.fine
+        const maxHalf = (pitch * Math.max(0.1, Math.min(1, this.settings.dotSize))) / 2
+        const cols = b.cols
+        const batches = this.fineBatches
+        batches.forEach((list) => (list.length = 0))
+        const acc = [0, 0, 0, 0]
+
+        for (let j = 0; j < fy.n; j++) {
+            const fadeY = fy.fade[j]
+            if (fadeY <= 0) continue
+            const cy = fy.off + (j + 0.5) * pitch
+            const jo = j * 4
+            for (let i = 0; i < fx.n; i++) {
+                const fade = fadeY * fx.fade[i]
+                if (fade <= 0) continue
+                const io = i * 4
+                acc[0] = acc[1] = acc[2] = acc[3] = 0
+                for (let a = 0; a < 4; a++) {
+                    const wy = fy.wt[jo + a]
+                    if (wy === 0) continue
+                    const rowBase = fy.idx[jo + a] * cols
+                    for (let c = 0; c < 4; c++) {
+                        const w = wy * fx.wt[io + c]
+                        const o = (rowBase + fx.idx[io + c]) * 4
+                        acc[0] += w * m[o]
+                        acc[1] += w * m[o + 1]
+                        acc[2] += w * m[o + 2]
+                        acc[3] += w * m[o + 3]
+                    }
+                }
+                const c0 = acc[0] > 0 ? acc[0] : 0,
+                    c1 = acc[1] > 0 ? acc[1] : 0,
+                    c2 = acc[2] > 0 ? acc[2] : 0,
+                    c3 = acc[3] > 0 ? acc[3] : 0
+                let bright = (c0 + c1 + c2 + c3) * fade
+                if (bright < 0.04) continue
+                if (bright > 1) bright = 1
+                // cubed weights sharpen the hue so fringes stay saturated
+                // instead of blending into pastels
+                const s0 = c0 * c0 * c0,
+                    s1 = c1 * c1 * c1,
+                    s2 = c2 * c2 * c2,
+                    s3 = c3 * c3 * c3
+                const ss = s0 + s1 + s2 + s3
+                const q = (v: number) => Math.round((v / ss) * 8)
+                const key = q(s0) * 729 + q(s1) * 81 + q(s2) * 9 + q(s3)
+                const hs = maxHalf * Math.sqrt(bright)
+                if (hs < 0.4) continue
+                const cx = fx.off + (i + 0.5) * pitch
+                const x = Math.round(cx - hs),
+                    y = Math.round(cy - hs)
+                let list = batches.get(key)
+                if (!list) batches.set(key, (list = []))
+                list.push(x, y, Math.max(1, Math.round(cx + hs) - x), Math.max(1, Math.round(cy + hs) - y))
+            }
+        }
+
+        ctx.fillStyle = this.bg
+        ctx.fillRect(0, 0, this.w, this.h)
+        batches.forEach((list, key) => {
+            if (!list.length) return
+            ctx.fillStyle = this.fineColor(key)
+            ctx.beginPath()
+            for (let j = 0; j < list.length; j += 4) ctx.rect(list[j], list[j + 1], list[j + 2], list[j + 3])
+            ctx.fill()
+        })
     }
 
     /** Draw the animation at `t` seconds of the baked (source) timeline. */
@@ -1570,6 +1757,7 @@ class FlowerRenderer {
         const k2 = Math.min(times.length - 1, k + 1)
         const span = times[k2] - times[k]
         const u = span > 0 ? Math.max(0, Math.min(1, (t - times[k]) / span)) : 0
+        if (this.settings.renderStyle !== "classic") return this.drawFine(k, k2, u)
         const cA = b.counts[k],
             rA = b.runs[k],
             cB = b.counts[k2],
@@ -1915,8 +2103,10 @@ export default function FlowerTransition(props: Props) {
     const settings: FlowerSettings = {
         duration: p.duration,
         fadeDuration: p.fadeDuration,
+        renderStyle: p.renderStyle,
         cellColumns: p.cellColumns,
         mobileColumns: p.mobileColumns,
+        dotSize: p.dotSize,
         background: p.background,
         creamColor: p.creamColor,
         redColor: p.redColor,
@@ -2073,23 +2263,42 @@ addPropertyControls(FlowerTransition, {
         step: 0.05,
         unit: "s",
     },
+    renderStyle: {
+        type: ControlType.Enum,
+        title: "Style",
+        options: ["fine", "classic"],
+        optionTitles: ["Fine (halftone)", "Classic (reference cells)"],
+        defaultValue: DEFAULT_SETTINGS.renderStyle,
+        displaySegmentedControl: true,
+    },
     cellColumns: {
         type: ControlType.Number,
         title: "Columns",
         defaultValue: DEFAULT_SETTINGS.cellColumns,
-        min: 20,
-        max: 120,
+        min: 40,
+        max: 260,
         step: 1,
         displayStepper: true,
+        hidden: (props: any) => props.renderStyle === "classic",
     },
     mobileColumns: {
         type: ControlType.Number,
         title: "Columns (Portrait)",
         defaultValue: DEFAULT_SETTINGS.mobileColumns,
-        min: 12,
-        max: 80,
+        min: 20,
+        max: 160,
         step: 1,
         displayStepper: true,
+        hidden: (props: any) => props.renderStyle === "classic",
+    },
+    dotSize: {
+        type: ControlType.Number,
+        title: "Dot Size",
+        defaultValue: DEFAULT_SETTINGS.dotSize,
+        min: 0.3,
+        max: 1,
+        step: 0.01,
+        hidden: (props: any) => props.renderStyle === "classic",
     },
     background: {
         type: ControlType.Color,
