@@ -16,6 +16,7 @@
 
 export type StyleName = "xray" | "classic" | "photo"
 export type Aspect = "16:9" | "1:1" | "4:5" | "9:16"
+export type AnimationName = "bloom" | "tour"
 
 export interface Settings {
     style: StyleName
@@ -34,9 +35,19 @@ export interface Settings {
     /** Exposure of the dot field. */
     glow: number
 
-    /** Seconds of camera motion. */
+    /**
+     * "bloom": the flower opens from a closed bud while the camera turns
+     * gently. "tour": the camera flies around the still image.
+     */
+    animation: AnimationName
+    /** How closed the bud starts (0 = already open, 1 = tight bud). */
+    bloomAmount: number
+    /** Bloom centre as a fraction of the image (null = detect it). */
+    bloomCenter: { x: number; y: number } | null
+
+    /** Seconds of motion (the bloom completes at about 80%). */
     duration: number
-    /** 0 = still, 1 = default path, up to 1.5 = more dramatic. */
+    /** Camera movement: 0 = still, 1 = default, up to 1.5. */
     motion: number
     /** How much the subject bulges in 3D while rotating (0..1). */
     depth: number
@@ -65,10 +76,13 @@ export const DEFAULT_SETTINGS: Settings = {
     background: "#0A0C0D",
     fillColor: "#7FE3EE",
     endBackground: "#0A0C0D",
-    columns: 220,
-    dotSize: 0.78,
+    columns: 300,
+    dotSize: 0.7,
     glow: 1,
-    duration: 4,
+    animation: "bloom",
+    bloomAmount: 1,
+    bloomCenter: null,
+    duration: 5,
     motion: 1,
     depth: 0.6,
     ending: true,
@@ -125,10 +139,14 @@ export interface Analysis {
     h: number
     /** points (subject pixels), normalised coords: longest side spans -1..1 */
     n: number
+    /** the first n0 points form an even-grid subsample (level of detail) */
+    n0: number
     x: Float32Array
     y: Float32Array
     /** 0..1 bulge (1 = deepest inside the subject) */
     z: Float32Array
+    /** 0..1 distance from the subject's edge (thin parts are near 0) */
+    thick: Float32Array
     /** X-ray intensity: translucent body, bright edges and detail */
     ix: Float32Array
     /** solid intensity: filled body */
@@ -145,9 +163,73 @@ export interface Analysis {
     hh: number
     /** subject mask preview (alpha 0..255), w x h */
     mask: Uint8ClampedArray
+    /** detected bloom centre (densest part of the subject), normalised */
+    bx: number
+    by: number
+    /** flower head radius, normalised */
+    br: number
 }
 
-const ANALYSIS_MAX = 460
+/** Normalised coords <-> image fractions, for a given analysis. */
+export function toNormalised(a: Pick<Analysis, "w" | "h">, fx: number, fy: number) {
+    const half = Math.max(a.w, a.h) / 2
+    return { x: (fx * a.w - a.w / 2) / half, y: (fy * a.h - a.h / 2) / half }
+}
+export function toFraction(a: Pick<Analysis, "w" | "h">, nx: number, ny: number) {
+    const half = Math.max(a.w, a.h) / 2
+    return { x: (nx * half + a.w / 2) / a.w, y: (ny * half + a.h / 2) / a.h }
+}
+
+/**
+ * The flower head: the point of highest subject density at a coarse scale
+ * (thin stems and leaves barely register), and a radius that holds most of
+ * the subject around it.
+ */
+function findBloom(alpha: Float32Array, w: number, h: number, px: Float32Array, py: Float32Array, n: number) {
+    const k = Math.max(3, Math.round(Math.max(w, h) * 0.09))
+    // integral image for box sums
+    const I = new Float64Array((w + 1) * (h + 1))
+    for (let y = 0; y < h; y++) {
+        let row = 0
+        for (let x = 0; x < w; x++) {
+            row += alpha[y * w + x]
+            I[(y + 1) * (w + 1) + x + 1] = I[y * (w + 1) + x + 1] + row
+        }
+    }
+    let best = -1,
+        bxp = w / 2,
+        byp = h / 2
+    for (let y = 0; y < h; y += 2)
+        for (let x = 0; x < w; x += 2) {
+            if (alpha[y * w + x] < 0.5) continue
+            const x0 = Math.max(0, x - k),
+                x1 = Math.min(w, x + k + 1),
+                y0 = Math.max(0, y - k),
+                y1 = Math.min(h, y + k + 1)
+            const sum = I[y1 * (w + 1) + x1] - I[y0 * (w + 1) + x1] - I[y1 * (w + 1) + x0] + I[y0 * (w + 1) + x0]
+            if (sum > best) {
+                best = sum
+                bxp = x
+                byp = y
+            }
+        }
+    const half = Math.max(w, h) / 2
+    const bx = (bxp + 0.5 - w / 2) / half,
+        by = (byp + 0.5 - h / 2) / half
+    return { bx, by, br: headRadius(px, py, n, bx, by) }
+}
+
+/** Radius around (bx, by) holding ~70% of the subject points. */
+export function headRadius(px: Float32Array, py: Float32Array, n: number, bx: number, by: number) {
+    if (!n) return 0.5
+    const step = Math.max(1, Math.floor(n / 4000))
+    const d: number[] = []
+    for (let i = 0; i < n; i += step) d.push(Math.hypot(px[i] - bx, py[i] - by))
+    d.sort((a, b) => a - b)
+    return Math.max(0.08, d[Math.floor(d.length * 0.7)])
+}
+
+const ANALYSIS_MAX = 640
 
 /** Median of a channel sample (for the background colour). */
 function median(a: number[]) {
@@ -239,25 +321,28 @@ export function analyze(
     for (let i = 0; i < N; i++) alpha[i] *= data[i * 4 + 3] / 255
     alpha = blur3(alpha, w, h)
 
-    // --- edges (Sobel on the masked luminance, so the silhouette glows)
-    const ML = new Float32Array(N)
-    for (let i = 0; i < N; i++) ML[i] = (0.35 + 0.65 * L[i]) * alpha[i]
+    // --- edges: inner detail (petal edges, veins: Sobel on the brightness,
+    // normalised within the subject) plus the silhouette (Sobel on the
+    // mask), so the X-ray shows structure and not only an outline
+    const sobel = (src: Float32Array) => {
+        const out = new Float32Array(N)
+        for (let y = 1; y < h - 1; y++)
+            for (let x = 1; x < w - 1; x++) {
+                const o = y * w + x
+                const gx = src[o - w + 1] + 2 * src[o + 1] + src[o + w + 1] - src[o - w - 1] - 2 * src[o - 1] - src[o + w - 1]
+                const gy = src[o + w - 1] + 2 * src[o + w] + src[o + w + 1] - src[o - w - 1] - 2 * src[o - w] - src[o - w + 1]
+                out[o] = Math.sqrt(gx * gx + gy * gy)
+            }
+        return out
+    }
+    const Ei = sobel(L)
+    const Es = sobel(alpha)
+    const inner: number[] = []
+    for (let i = 0; i < N; i += 5) if (alpha[i] > 0.9) inner.push(Ei[i])
+    inner.sort((a, b) => a - b)
+    const eRef = inner[Math.floor(inner.length * 0.92)] || 1
     const E = new Float32Array(N)
-    for (let y = 1; y < h - 1; y++)
-        for (let x = 1; x < w - 1; x++) {
-            const o = y * w + x
-            const gx =
-                ML[o - w + 1] + 2 * ML[o + 1] + ML[o + w + 1] - ML[o - w - 1] - 2 * ML[o - 1] - ML[o + w - 1]
-            const gy =
-                ML[o + w - 1] + 2 * ML[o + w] + ML[o + w + 1] - ML[o - w - 1] - 2 * ML[o - w] - ML[o - w + 1]
-            E[o] = Math.sqrt(gx * gx + gy * gy)
-        }
-    // normalise by a high percentile so a few hard edges don't dominate
-    const sample: number[] = []
-    for (let i = 0; i < N; i += 7) if (alpha[i] > 0.05) sample.push(E[i])
-    sample.sort((a, b) => a - b)
-    const eRef = sample[Math.floor(sample.length * 0.97)] || 1
-    for (let i = 0; i < N; i++) E[i] = Math.min(1, E[i] / eRef)
+    for (let i = 0; i < N; i++) E[i] = Math.min(1, (0.85 * Math.min(1.2, Ei[i] / eRef)) * alpha[i] + 0.12 * Es[i])
 
     // --- depth: distance inside the mask (chamfer), so the middle of the
     // subject bulges towards the camera when it rotates
@@ -267,6 +352,16 @@ export function analyze(
     let dMax = 0
     for (let i = 0; i < N; i++) if (D[i] < 1e8 && D[i] > dMax) dMax = D[i]
 
+    // --- luminance stretched over the subject's own range, so dark (e.g.
+    // red) flowers get the same tonal spread as pale ones
+    const ls: number[] = []
+    for (let i = 0; i < N; i += 3) if (alpha[i] > 0.5) ls.push(L[i])
+    ls.sort((p, q) => p - q)
+    const lLo = ls[Math.floor(ls.length * 0.05)] ?? 0,
+        lHi = ls[Math.floor(ls.length * 0.97)] ?? 1
+    const lSpan = Math.max(0.05, lHi - lLo)
+    const Ln = (i: number) => Math.max(0, Math.min(1, (L[i] - lLo) / lSpan))
+
     // --- points
     let n = 0
     for (let i = 0; i < N; i++) if (alpha[i] > 0.04) n++
@@ -274,6 +369,7 @@ export function analyze(
         x: new Float32Array(n),
         y: new Float32Array(n),
         z: new Float32Array(n),
+        thick: new Float32Array(n),
         ix: new Float32Array(n),
         is: new Float32Array(n),
         r: new Uint8Array(n),
@@ -286,12 +382,18 @@ export function analyze(
         maxX = -1e9,
         maxY = -1e9
     const mask = new Uint8ClampedArray(N)
+    for (let i = 0; i < N; i++) mask[i] = alpha[i] * 255
+    // level of detail: points on even rows and columns come first, so a
+    // coarse pass can take just the first quarter (n0) of the array
+    let n0 = 0
     let j = 0
+    for (let pass = 0; pass < 2; pass++)
     for (let y = 0; y < h; y++)
         for (let x = 0; x < w; x++) {
+            const even = (x & 1) === 0 && (y & 1) === 0
+            if ((pass === 0) !== even) continue
             const i = y * w + x
             const a = alpha[i]
-            mask[i] = a * 255
             if (a <= 0.04) continue
             const nx = (x + 0.5 - w / 2) / half
             const ny = (y + 0.5 - h / 2) / half
@@ -299,8 +401,10 @@ export function analyze(
             P.y[j] = ny
             const dz = dMax > 0 ? Math.min(1, D[i] / dMax) : 0
             P.z[j] = Math.sqrt(dz) * 0.85 + L[i] * 0.15
-            P.ix[j] = a * (0.07 + 0.3 * L[i] + 1.15 * E[i])
-            P.is[j] = a * (0.75 + 0.25 * L[i]) + 0.35 * E[i]
+            P.thick[j] = dz
+            const ln = Ln(i)
+            P.ix[j] = a * (0.06 + 0.32 * ln * ln + 1.2 * E[i])
+            P.is[j] = a * (0.75 + 0.25 * ln) + 0.35 * E[i]
             P.r[j] = data[i * 4]
             P.g[j] = data[i * 4 + 1]
             P.b[j] = data[i * 4 + 2]
@@ -311,6 +415,7 @@ export function analyze(
                 if (ny > maxY) maxY = ny
             }
             j++
+            if (pass === 0) n0 = j
         }
     if (minX > maxX) {
         minX = -w / 2 / half
@@ -318,10 +423,24 @@ export function analyze(
         minY = -h / 2 / half
         maxY = h / 2 / half
     }
+    // X-ray exposure per image: the brightest ~10% of the subject maps
+    // near full brightness
+    if (n) {
+        const xs: number[] = []
+        for (let k = 0; k < n; k += Math.max(1, Math.floor(n / 5000))) xs.push(P.ix[k])
+        xs.sort((p, q) => p - q)
+        const ref = xs[Math.floor(xs.length * 0.9)] || 1
+        const k = 0.95 / ref
+        // clamp so a few extreme highlights don't sparkle as lone dots
+        for (let q = 0; q < n; q++) P.ix[q] = Math.min(1.15, P.ix[q] * k)
+    }
+    const bloom = findBloom(alpha, w, h, P.x, P.y, n)
     return {
+        ...bloom,
         w,
         h,
         n,
+        n0,
         ...P,
         unit: 1 / half,
         cx: (minX + maxX) / 2,
@@ -405,16 +524,27 @@ const KEYS: [number, Cam][] = [
     [0.86, { yaw: -8, pitch: 5, roll: 1, zoom: 1.06, px: 0, py: 0, stretch: 1.03 }],
     [1.0, { yaw: 0, pitch: 0, roll: 0, zoom: 1, px: 0, py: 0, stretch: 1 }],
 ]
+// bloom: the flower is the motion; the camera only turns gently so the 3D
+// of the opening petals reads, easing in slightly closer on the bud
+const BLOOM_KEYS: [number, Cam][] = [
+    [0.0, { yaw: -18, pitch: 14, roll: -2, zoom: 1.16, px: 0, py: 0, stretch: 1 }],
+    [0.3, { yaw: -10, pitch: 10, roll: -1, zoom: 1.12, px: 0, py: 0, stretch: 1 }],
+    [0.65, { yaw: 6, pitch: 4, roll: 1, zoom: 1.04, px: 0, py: 0, stretch: 1 }],
+    [1.0, { yaw: 2, pitch: 0, roll: 0, zoom: 1, px: 0, py: 0, stretch: 1 }],
+]
+const REST: Cam = { yaw: 0, pitch: 0, roll: 0, zoom: 1, px: 0, py: 0, stretch: 1 }
+
 const CAM_FIELDS: (keyof Cam)[] = ["yaw", "pitch", "roll", "zoom", "px", "py", "stretch"]
 
-export function cameraAt(tau: number, motion: number): Cam {
+export function cameraAt(tau: number, motion: number, keys: [number, Cam][] = KEYS): Cam {
+    const KEYS_ = keys
     const t = clamp01(tau)
     let i = 0
-    while (i < KEYS.length - 2 && KEYS[i + 1][0] <= t) i++
-    const [t1, c1] = KEYS[i]
-    const [t2, c2] = KEYS[i + 1]
-    const c0 = KEYS[Math.max(0, i - 1)][1]
-    const c3 = KEYS[Math.min(KEYS.length - 1, i + 2)][1]
+    while (i < KEYS_.length - 2 && KEYS_[i + 1][0] <= t) i++
+    const [t1, c1] = KEYS_[i]
+    const [t2, c2] = KEYS_[i + 1]
+    const c0 = KEYS_[Math.max(0, i - 1)][1]
+    const c3 = KEYS_[Math.min(KEYS_.length - 1, i + 2)][1]
     const u = (t - t1) / (t2 - t1)
     const out = {} as Cam
     for (const f of CAM_FIELDS) {
@@ -429,7 +559,7 @@ export function cameraAt(tau: number, motion: number): Cam {
                 (-p0 + p2) * u +
                 (2 * p0 - 5 * p1 + 4 * p2 - p3) * u * u +
                 (-p0 + 3 * p1 - 3 * p2 + p3) * u * u * u)
-        const rest = KEYS[0][1][f]
+        const rest = REST[f]
         out[f] = rest + (v - rest) * motion
     }
     return out
@@ -461,6 +591,30 @@ export function timeline(s: Settings): Timeline {
 // Renderer
 // ---------------------------------------------------------------------------
 
+interface BloomGeometry {
+    bx: number
+    by: number
+    /** typical head radius (framing, timing) */
+    R: number
+    /** full head extent: everything inside folds into the bud */
+    RH: number
+    r: Float32Array
+    ux: Float32Array
+    uy: Float32Array
+    /** how much of the head this point is (1 = head, 0 = stem/leaves) */
+    h: Float32Array
+    /** when it starts opening (0..~0.6 of the bloom) */
+    delay: Float32Array
+    phase: Float32Array
+    /** closed (bud) direction, unit vector */
+    cx: Float32Array
+    cy: Float32Array
+    cz: Float32Array
+    /** angle between the open and closed directions, and its sine */
+    om: Float32Array
+    som: Float32Array
+}
+
 export class Animator {
     private ctx: CanvasRenderingContext2D
     private W = 1
@@ -475,6 +629,9 @@ export class Animator {
     private accG = new Float32Array(1)
     private accB = new Float32Array(1)
     private tmp = new Float32Array(1)
+    /** surface (geometric) coverage per cell, to average the intensity */
+    private cov = new Float32Array(1)
+    private tmp2 = new Float32Array(1)
     private val = new Float32Array(1)
     private prev = new Float32Array(1)
     private hasPrev = false
@@ -483,6 +640,8 @@ export class Animator {
     private strokes = new Map<number, number[]>()
     private colorCache = new Map<number, string>()
     private timelineCache: Timeline
+    private bloom: BloomGeometry | null = null
+    private gainCache = 0
 
     constructor(
         private canvas: HTMLCanvasElement,
@@ -500,15 +659,19 @@ export class Animator {
 
     setAnalysis(a: Analysis) {
         this.a = a
+        this.bloom = null
+        this.gainCache = 0
         this.delays = null
         this.hasPrev = false
     }
 
     setSettings(s: Settings) {
         const gridChanged = s.columns !== this.s.columns
+        if (JSON.stringify(s.bloomCenter) !== JSON.stringify(this.s.bloomCenter)) this.bloom = null
         this.s = s
         this.timelineCache = timeline(s)
         this.colorCache.clear()
+        this.gainCache = 0
         this.delays = null
         if (gridChanged) this.resize(this.W, this.H)
     }
@@ -527,29 +690,61 @@ export class Animator {
         this.offX = Math.floor((this.W - this.cols * this.pitch) / 2)
         this.offY = Math.floor((this.H - this.rows * this.pitch) / 2)
         const n = this.cols * this.rows
-        for (const k of ["acc", "accR", "accG", "accB", "tmp", "val", "prev"] as const)
+        for (const k of ["acc", "accR", "accG", "accB", "tmp", "val", "prev", "cov", "tmp2"] as const)
             this[k] = new Float32Array(n)
         this.delays = null
         this.hasPrev = false
+        this.gainCache = 0
     }
 
     /** Pixels per normalised unit at rest (subject fits the frame). */
     private baseScale() {
         const a = this.a
+        if (this.s.animation === "bloom") {
+            // close-up on the flower head, like a bloom time-lapse
+            const g = this.bloomGeometry()
+            return (Math.min(this.H, this.W * 1.1) * 0.44) / Math.max(g.RH, g.R * 1.15)
+        }
         return Math.min((0.7 * this.H) / (2 * a.hh), (0.78 * this.W) / (2 * a.hw))
     }
 
+    /** Point the camera frames and turns around (normalised coords). */
+    private pivot(): { x: number; y: number } {
+        if (this.s.animation === "bloom") {
+            const g = this.bloomGeometry()
+            // head a touch above centre, stem running off the bottom
+            return { x: g.bx, y: g.by + g.RH * 0.08 }
+        }
+        return { x: this.a.cx, y: this.a.cy }
+    }
+
     /** Project the point cloud for camera `cam` into this.val (0..1). */
-    private computeField(tau: number) {
+    private computeField(tau: number, raw = false) {
         const a = this.a,
             s = this.s
-        const cam = cameraAt(tau, s.motion)
+        // (calibrating projects the open frame, so do it before this frame
+        // fills the buffers)
+        const gain = raw ? 0 : this.exposure() * s.glow
+        const blooming = s.animation === "bloom"
+        const cam = cameraAt(tau, s.motion, blooming ? BLOOM_KEYS : KEYS)
+        const bg = blooming ? this.bloomGeometry() : null
+        // bloom progress: opens over the first ~80% of the motion, easing in
+        // and settling like a time-lapse
+        const b = blooming ? smooth((tau + 0.08) / 0.86) : 1
+        const closed = Math.max(0, Math.min(1, s.bloomAmount))
+        const tSec = tau * s.duration
+        const pv = this.pivot()
+        // the closed bud sits on the stem, below the open flower's centre,
+        // and rises into place as it opens
+        const lift = bg ? bg.RH * 0.8 * (1 - b) * closed : 0
         const { cols, rows, pitch } = this
         const acc = this.acc,
             ar = this.accR,
             ag = this.accG,
             ab = this.accB
         acc.fill(0)
+        const cov = this.cov
+        cov.fill(0)
         const photo = s.style === "photo"
         if (photo) {
             ar.fill(0)
@@ -565,7 +760,7 @@ export class Animator {
             sp = Math.sin(cam.pitch * D2R)
         const cr = Math.cos(cam.roll * D2R),
             sr = Math.sin(cam.roll * D2R)
-        const size = Math.max(a.hw, a.hh)
+        const size = bg ? bg.R * 1.2 : Math.max(a.hw, a.hh)
         const depth = s.depth * size * 0.9
         const f = size * 3.2 // perspective focal length
         const S = this.baseScale() * cam.zoom
@@ -579,12 +774,57 @@ export class Animator {
             oy = (this.H / 2 - this.offY) / pitch - 0.5
         const invP = S / pitch
         // distance between neighbouring points, in cells
-        const spacing = unitPx * cam.stretch / pitch
+        let spacing = unitPx * cam.stretch / pitch
+        // points packed much tighter than the dots: the even-grid quarter of
+        // them, each standing in for four, looks the same at a quarter of
+        // the work
+        let count = a.n
+        let lodW = 1
+        if (spacing * 2 < 0.9 && a.n0 > 0) {
+            count = a.n0
+            lodW = 4
+            spacing *= 2
+        }
 
-        for (let i = 0; i < a.n; i++) {
-            const X = a.x[i] - a.cx,
-                Y = a.y[i] - a.cy,
+        for (let i = 0; i < count; i++) {
+            let X = a.x[i] - pv.x,
+                Y = a.y[i] - pv.y,
                 Z = a.z[i] * depth
+            let shade = 1
+            if (bg && closed > 0) {
+                const h = bg.h[i]
+                if (h > 0) {
+                    // this point's own progress: outer petals open first,
+                    // each petal (angular sector) on its own schedule
+                    const d = bg.delay[i]
+                    const e = smooth((b - d) / (1 - d))
+                    // a living flutter while it opens
+                    const flutter = 0.05 * Math.sin(tSec * 3.1 + bg.phase[i]) * h * (1 - 0.8 * e)
+                    const fold = Math.max(0, Math.min(1, (1 - e) * h * closed + flutter))
+                    // petal hinged at the centre: swing its direction from the
+                    // closed bud (a narrow twisted cone around the bud axis)
+                    // back to where it lies in the photo (slerp)
+                    const om = bg.om[i]
+                    let dx = bg.ux[i],
+                        dy = bg.uy[i],
+                        dz = 0
+                    if (om > 1e-3 && fold > 1e-3) {
+                        const so = bg.som[i]
+                        const k0 = Math.sin((1 - fold) * om) / so,
+                            k1 = Math.sin(fold * om) / so
+                        dx = k0 * dx + k1 * bg.cx[i]
+                        dy = k0 * dy + k1 * bg.cy[i]
+                        dz = k1 * bg.cz[i]
+                    }
+                    // the bud is smaller than the open flower
+                    const rr = bg.r[i] * (1 - 0.38 * fold)
+                    X = bg.bx - pv.x + dx * rr
+                    Y = bg.by - pv.y + dy * rr + lift * h
+                    Z = Z * (1 - fold) + dz * rr
+                    // a closed bud is denser: keep it from blowing out
+                    shade = 1 - 0.55 * fold
+                }
+            }
             // yaw (around y), pitch (around x), roll (around z)
             const x1 = X * cy + Z * sy
             const z1 = -X * sy + Z * cy
@@ -595,13 +835,14 @@ export class Animator {
             const persp = f / (f - z2)
             const gx = (x3 * cam.stretch - panX) * persp * invP + ox
             const gy = (y3 - panY) * persp * invP + oy
-            const w = I[i] * wBase * persp * persp
+            const wg = wBase * persp * persp * lodW
+            const w = I[i] * shade * wg
             // zoomed in past the image detail, points land more than a cell
             // apart: splat a box as big as the point's footprint instead,
             // or the gaps show up as a grid of lines
             const spread = spacing * persp
             if (spread > 1.05) {
-                this.splatBox(gx, gy, spread / 2, w, photo ? i : -1)
+                this.splatBox(gx, gy, spread / 2, w, wg, photo ? i : -1)
                 continue
             }
             const ix = Math.floor(gx),
@@ -619,13 +860,29 @@ export class Animator {
                 inX1 = ix + 1 < cols,
                 inY0 = iy >= 0,
                 inY1 = iy + 1 < rows
+            const g00 = (1 - fx) * (1 - fy) * wg,
+                g10 = fx * (1 - fy) * wg,
+                g01 = (1 - fx) * fy * wg,
+                g11 = fx * fy * wg
             if (inY0) {
-                if (inX0) acc[o] += w00
-                if (inX1) acc[o + 1] += w10
+                if (inX0) {
+                    acc[o] += w00
+                    cov[o] += g00
+                }
+                if (inX1) {
+                    acc[o + 1] += w10
+                    cov[o + 1] += g10
+                }
             }
             if (inY1) {
-                if (inX0) acc[o + cols] += w01
-                if (inX1) acc[o + cols + 1] += w11
+                if (inX0) {
+                    acc[o + cols] += w01
+                    cov[o + cols] += g01
+                }
+                if (inX1) {
+                    acc[o + cols + 1] += w11
+                    cov[o + cols + 1] += g11
+                }
             }
             if (photo) {
                 const r = a.r[i],
@@ -654,25 +911,159 @@ export class Animator {
             }
         }
 
-        // soften: [1 2 1] blur fills gaps when zoomed past the image detail
-        const t = this.tmp,
-            v = this.val
-        for (let y = 0; y < rows; y++)
-            for (let x = 0; x < cols; x++) {
-                const o = y * cols + x
-                t[o] = (acc[x > 0 ? o - 1 : o] + 2 * acc[o] + acc[x < cols - 1 ? o + 1 : o]) / 4
+        if (raw) return
+        // brightness = average intensity of the surface in the cell, faded
+        // where the cell is only partly covered and gently boosted where
+        // layers overlap (X-ray translucency), so it holds steady with zoom
+        // and with how tightly the bud is packed. No blur: footprint splats
+        // already close the gaps, and blurring flattens the fine edges.
+        const v = this.val
+        for (let o = 0; o < v.length; o++) {
+            const c = cov[o]
+            if (c < 1e-4) {
+                v[o] = 0
+                continue
             }
-        const gain = (s.style === "xray" ? 2.1 : 2.4) * s.glow
-        for (let y = 0; y < rows; y++)
-            for (let x = 0; x < cols; x++) {
-                const o = y * cols + x
-                const b = (t[y > 0 ? o - cols : o] + 2 * t[o] + t[y < rows - 1 ? o + cols : o]) / 4
-                v[o] = 1 - Math.exp(-b * gain)
+            const cover = (c < 1 ? c : 1) * (1 + 0.35 * Math.log2(c > 1 ? c : 1))
+            v[o] = 1 - Math.exp(-(acc[o] / c) * cover * gain)
+        }
+    }
+
+    /**
+     * Exposure for this image and style, calibrated once on the finished
+     * (open) frame: the brightest ~5% of dots land near full brightness, so a
+     * heavily textured peony and a sparse lily both read well.
+     */
+    private exposure(): number {
+        if (this.gainCache > 0) return this.gainCache
+        this.computeField(1, true)
+        const m: number[] = []
+        for (let o = 0; o < this.cov.length; o++) if (this.cov[o] > 0.5) m.push(this.acc[o] / this.cov[o])
+        m.sort((p, q) => p - q)
+        const ref = m[Math.floor(m.length * 0.95)] || 1
+        const target = this.s.style === "xray" ? 2 : 3
+        this.gainCache = target / Math.max(1e-3, ref)
+        return this.gainCache
+    }
+
+    /** Per-point polar layout around the bloom centre (cached). */
+    private bloomGeometry(): BloomGeometry {
+        if (this.bloom) return this.bloom
+        const a = this.a
+        let bx = a.bx,
+            by = a.by,
+            R = a.br
+        if (this.s.bloomCenter) {
+            const c = toNormalised(a, this.s.bloomCenter.x, this.s.bloomCenter.y)
+            bx = c.x
+            by = c.y
+            R = headRadius(a.x, a.y, a.n, bx, by)
+        }
+        const n = a.n
+        // full extent of the head: from the points pointing sideways or up
+        // (so the stem doesn't count), generous enough for long stamens
+        const ext: number[] = []
+        for (let i = 0; i < n; i += Math.max(1, Math.floor(n / 6000))) {
+            const dx = a.x[i] - bx,
+                dy = a.y[i] - by
+            const r = Math.hypot(dx, dy)
+            if (dy < 0.35 * r) ext.push(r)
+        }
+        ext.sort((p, q) => p - q)
+        const RH = Math.max(R * 1.1, (ext[Math.floor(ext.length * 0.97)] ?? R) * 1.04)
+        const g: BloomGeometry = {
+            bx,
+            by,
+            R,
+            RH,
+            r: new Float32Array(n),
+            ux: new Float32Array(n),
+            uy: new Float32Array(n),
+            h: new Float32Array(n),
+            delay: new Float32Array(n),
+            phase: new Float32Array(n),
+            cx: new Float32Array(n),
+            cy: new Float32Array(n),
+            cz: new Float32Array(n),
+            om: new Float32Array(n),
+            som: new Float32Array(n),
+        }
+        // bud axis: up (image y is down) and a little towards the camera
+        const AL = Math.hypot(0.97, 0.22)
+        const Ax = 0,
+            Ay = -0.97 / AL,
+            Az = 0.22 / AL
+        const CONE = 0.34 // bud half-angle (rad)
+        const TWIST = 0.9 // spiral wrap of the closed petals (rad)
+        // petal-ish angular noise: a few random harmonics
+        let seed = 9876543
+        const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647)
+        const harm = [5, 6, 7, 9].map((k) => ({ k, p: rnd() * Math.PI * 2, a: 0.5 + rnd() * 0.5 }))
+        const norm = harm.reduce((t, x) => t + x.a, 0)
+        for (let i = 0; i < n; i++) {
+            const dx = a.x[i] - bx,
+                dy = a.y[i] - by
+            const r = Math.hypot(dx, dy)
+            const th = Math.atan2(dy, dx)
+            g.r[i] = r
+            g.ux[i] = r > 1e-6 ? dx / r : 0
+            g.uy[i] = r > 1e-6 ? dy / r : 0
+            const rn = r / R
+            // all or nothing: the head (everything within its extent) folds
+            // into the bud; the stem and leaves beyond stay put. Partly
+            // folded points smear into arcs and stripes.
+            // the stem stays a stem: thin, below the centre, heading down
+            const stem = dy > 0.3 * R && Math.abs(dx) < 0.12 * R + 0.12 * dy && a.thick[i] < 0.35
+            g.h[i] = r < RH && !stem ? 1 : 0
+            let nz = 0
+            for (const x of harm) nz += x.a * (0.5 + 0.5 * Math.sin(x.k * th + x.p))
+            nz /= norm
+            g.delay[i] = Math.min(0.5, 0.32 * (1 - Math.min(1, rn)) + 0.16 * nz)
+            g.phase[i] = th * 3 + nz * 6
+            // closed direction: on a cone around the bud axis, on the side the
+            // petal points to, wrapped by a twist that grows towards the tip
+            const ux = g.ux[i],
+                uy = g.uy[i]
+            const ua = ux * Ax + uy * Ay
+            let px = ux - ua * Ax,
+                py = uy - ua * Ay,
+                pz = -ua * Az
+            let pl = Math.hypot(px, py, pz)
+            if (pl < 1e-4) {
+                px = 1
+                py = 0
+                pz = 0
+                pl = 1
             }
+            px /= pl
+            py /= pl
+            pz /= pl
+            let cx = Ax * Math.cos(CONE) + px * Math.sin(CONE)
+            let cy = Ay * Math.cos(CONE) + py * Math.sin(CONE)
+            let cz = Az * Math.cos(CONE) + pz * Math.sin(CONE)
+            // rotate around the axis (Rodrigues)
+            const tw = TWIST * Math.min(1, rn) + nz * 0.4
+            const ct = Math.cos(tw),
+                st = Math.sin(tw)
+            const kx = Ay * cz - Az * cy,
+                ky = Az * cx - Ax * cz,
+                kz = Ax * cy - Ay * cx
+            const kd = Ax * cx + Ay * cy + Az * cz
+            const rx = cx * ct + kx * st + Ax * kd * (1 - ct)
+            const ry = cy * ct + ky * st + Ay * kd * (1 - ct)
+            const rz = cz * ct + kz * st + Az * kd * (1 - ct)
+            g.cx[i] = rx
+            g.cy[i] = ry
+            g.cz[i] = rz
+            g.om[i] = Math.acos(Math.max(-1, Math.min(1, ux * rx + uy * ry)))
+            g.som[i] = Math.sin(g.om[i])
+        }
+        this.bloom = g
+        return g
     }
 
     /** Area-weighted splat of a square footprint (half size r, in cells). */
-    private splatBox(gx: number, gy: number, r: number, w: number, pi: number) {
+    private splatBox(gx: number, gy: number, r: number, w: number, wg: number, pi: number) {
         const { cols, rows } = this
         const x0 = gx - r + 0.5,
             x1 = gx + r + 0.5,
@@ -686,7 +1077,8 @@ export class Animator {
         // footprint covers several cells: each gets the share of the point's
         // weight it overlaps (w is "per cell fully covered" already scaled by
         // the point area, so divide by the footprint area in cells)
-        const norm = w / (4 * r * r)
+        const norm = w / (4 * r * r),
+            normG = wg / (4 * r * r)
         const a = this.a
         for (let y = cy0; y <= cy1; y++) {
             const oy = Math.min(y + 1, y1) - Math.max(y, y0)
@@ -697,6 +1089,7 @@ export class Animator {
                 const ww = norm * ox * oy
                 const o = y * cols + x
                 this.acc[o] += ww
+                this.cov[o] += normG * ox * oy
                 if (pi >= 0) {
                     this.accR[o] += ww * a.r[pi]
                     this.accG[o] += ww * a.g[pi]
@@ -742,7 +1135,7 @@ export class Animator {
                 if (val < 0.025) continue
                 const cx = this.offX + (i + 0.5) * pitch
                 let key = 0
-                let half = maxHalf * (0.2 + 0.8 * Math.sqrt(val))
+                let half = maxHalf * (0.12 + 0.88 * Math.sqrt(val))
                 if (s.style === "xray") {
                     key = Math.min(31, Math.floor(val * 32))
                 } else if (s.style === "photo") {
@@ -775,7 +1168,8 @@ export class Animator {
             if (s.style === "xray") {
                 fill = this.color(key, () => {
                     const t = (key + 0.5) / 32
-                    const m = Math.min(1, t * 1.15)
+                    // steep curve: dim bodies, glowing edges and veins
+                    const m = Math.min(1, Math.pow(t, 1.1) * 1.3)
                     const wt = Math.max(0, (t - 0.72) / 0.28) * 0.55
                     const c = [0, 1, 2].map((ch) => {
                         const base = bg[ch] + (tint[ch] - bg[ch]) * m

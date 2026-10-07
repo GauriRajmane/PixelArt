@@ -1,16 +1,20 @@
 # PixelArt
 
-Turn any image into a moving pixel animation. Upload a picture, and PixelArt
-cuts out the subject and turns it into a 3D point cloud. A camera then flies
-around it (rest → turn and push in → close-up → wide tilted sweep → settle)
-and every frame is drawn as a fine grid of square dots. It ends with the
-signature finish: the colour floods out from the subject while it's still
-moving, then the background grows back in through it, square by square.
+Upload a photo of a flower and get back a **blooming pixel animation**: the
+flower starts as a closed bud on its stem and unfurls into the flower in your
+photo, petal by petal, while the camera turns gently around it. Every frame is
+drawn as a fine grid of square dots. It ends with the signature finish: the
+colour floods out from the flower while it's still moving, then the background
+grows back in through it, square by square.
+
+There is also a **Fly-through** mode, where the camera flies around the still
+subject instead (rest → turn and push in → close-up → wide tilted sweep →
+settle), for images that aren't flowers.
 
 Styles:
 
 - **X-ray** (default): a translucent, glowing look. Dots are tinted (cyan by
-  default) and edges and fine detail light up. Where parts of the subject
+  default) and petal edges and veins light up. Where parts of the subject
   overlap as it turns, the brightness adds up, like an X-ray.
 - **Classic**: the look of the original reference. Cream dots, red / yellow /
   blue fringes where the image is changing, and hollow outlined dots in the
@@ -33,10 +37,17 @@ app is checked in at `dist/app.js`.
 3. **Tune the look.** Style, tint, background, **Density** (dot columns
    across the frame: higher means smaller, finer dots), **Dot size** and
    **Glow**.
-4. **Tune the motion.** **Duration** (seconds of camera motion), **Movement**
-   (0 = still, 1 = default path, 1.5 = more dramatic) and **Depth** (how much
-   the subject bulges in 3D as it turns).
-5. **Ending.** **Fill colour** floods the frame from the subject. It starts
+4. **Tune the motion.**
+   - **Bloom** (default) or **Fly-through**.
+   - **Bud:** how closed the flower starts (1 = a tight bud, 0 = no bloom).
+   - **Centre:** where the flower blooms from. It's detected automatically
+     (the densest part of the subject). The thumbnail shows it as a cross,
+     with a dashed ring for the head size. Click the thumbnail to move it, for
+     example onto a different flower in a bunch. *Reset* goes back to auto.
+   - **Duration:** seconds of motion. The bloom completes at about 80%.
+   - **Camera:** how much the camera turns (0 = still, up to 1.5).
+   - **Depth:** how much the subject bulges in 3D.
+6. **Ending.** **Fill colour** floods the frame from the subject. It starts
    during the last stretch of motion, so nothing stops abruptly. **Reveals**
    is what grows back in through it: a colour, or *Transparent* so the
    embedding page shows through. **Fill** and **Reveal** set the timing.
@@ -58,7 +69,7 @@ Settings are remembered in your browser between visits.
 `src/engine.ts` (no dependencies; used by the app and by every export):
 
 1. **Analysis** (when the image or cut-out settings change). The image is
-   scaled to at most 460 px.
+   scaled to at most 640 px.
    - **Background:** modelled as a smooth gradient, using colour profiles from
      bands just inside each edge (so thin frames are skipped). The profiles
      are median-smoothed so a subject touching an edge doesn't leak in, then
@@ -69,22 +80,49 @@ Settings are remembered in your browser between visits.
      the middle of the subject bulges towards the camera.
    - **Points:** every subject pixel becomes a 3D point with an X-ray
      intensity (body + brightness + edges), a solid intensity and its colour.
-2. **Camera path.** Smooth Catmull-Rom curves through key poses (yaw, pitch,
-   roll, zoom, pan, horizontal stretch), scaled by *Movement*.
-3. **Projection.**
+2. **Bloom** (synthesised from one photo of an open flower, by running the
+   bloom backwards):
+   - **Head:** the bloom centre is the point of highest subject density at a
+     coarse scale, so thin stems and leaves barely register. Its extent is
+     measured from the points that point sideways or upward, so the stem
+     doesn't inflate it and long stamens are included. Everything inside the
+     head blooms. The stem (a thin, near-vertical column under the centre)
+     and anything outside the head stay put. Half-folded points smear into
+     arcs and stripes, so a point is either fully part of the head or not.
+   - **Closed bud:** each point's direction from the centre is swung onto a
+     narrow cone around an "up and slightly towards the camera" bud axis,
+     with a spiral twist that grows towards the petal tips. The petals are
+     hinged at the centre and wrap into an upright, twisted bud that sits on
+     the stem.
+   - **Opening:** each frame interpolates every point between its bud
+     direction and its real position (slerp). The outer petals open first
+     and the centre last. Each petal (angular sector) gets its own timing
+     offset and a small flutter, and the head grows and rises into place.
+   - **Camera:** a gentle turn and slight pull-back while it blooms, framed
+     as a close-up on the head.
+3. **Fly-through camera.** Smooth Catmull-Rom curves through key poses (yaw,
+   pitch, roll, zoom, pan, horizontal stretch), scaled by *Camera*.
+4. **Projection.**
    - Each frame, the points are rotated, given perspective, and spread
      across neighbouring grid cells.
    - Each point counts as much as the screen area it covers, so brightness
      stays the same as the camera zooms. When zoomed past the image's own
      detail, a point spreads over a box the size of its footprint, so there
      are no gaps.
-   - A light blur and an exposure curve turn the totals into a 0–1
-     brightness per cell.
-4. **Dots.** The grid pitch is snapped to whole device pixels so every cell is
+   - Each dot shows the *average* intensity of the surface landing in it,
+     with a gentle boost where layers overlap (X-ray translucency). That way
+     a tightly packed bud doesn't blow out and zooming doesn't change
+     brightness.
+   - Exposure is calibrated once per animation on the open flower, so a
+     textured peony and a sparse lily both read well.
+   - When points are packed much more tightly than the dots, only an
+     even-grid quarter of them is projected, each counting four times (level
+     of detail).
+5. **Dots.** The grid pitch is snapped to whole device pixels so every cell is
    identical (no beat patterns). Dot size and colour come from the cell
    brightness and the chosen style. Rectangles are batched by colour, so a
    frame is a few dozen `fill()` calls.
-5. **Ending.**
+6. **Ending.**
    - Fill timing comes from the frame where the fill starts: cells inside the
      subject start first, then the fill moves outward by distance with a
      little jitter.
@@ -95,8 +133,9 @@ Settings are remembered in your browser between visits.
 `src/player.ts` is the small standalone player built into the embeds.
 `src/app.tsx` is the creator UI (React).
 
-At the default density, a 1440×900 browser window plays at 60 fps, at 1× and
-2× pixel density, in Chromium.
+At the default density (300 columns), a 1440×900 browser window plays at
+60 fps, at 1× and 2× pixel density, in Chromium. That includes a dense peony
+photo with about 170k points.
 
 ## Develop
 

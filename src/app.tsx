@@ -4,6 +4,9 @@ import { createRoot } from "react-dom/client"
 import {
     analyze,
     Analysis,
+    AnimationName,
+    headRadius,
+    toNormalised,
     ANALYSIS_KEYS,
     Animator,
     Aspect,
@@ -155,7 +158,7 @@ function readFile(file: File): Promise<string> {
 // app
 // ---------------------------------------------------------------------------
 
-const STORAGE_KEY = "pixelart:settings"
+const STORAGE_KEY = "pixelart:settings:v2" // v2: bloom defaults
 
 function initialSettings(): Settings {
     try {
@@ -233,6 +236,11 @@ function App() {
     useEffect(() => {
         useSource(exampleImage(), "Example flower")
     }, [useSource])
+
+    // a new image gets its own detected bloom centre
+    useEffect(() => {
+        set("bloomCenter", null)
+    }, [image])
 
     // paste an image from the clipboard
     useEffect(() => {
@@ -351,7 +359,53 @@ function App() {
             id.data[o + 2] = id.data[o + 2] * (0.25 + 0.15 * m) + 238 * 0.6 * m
         }
         ctx.putImageData(id, 0, 0)
-    }, [analysis, showMask, image])
+        // bloom centre and head size
+        if (s.animation === "bloom") {
+            const half = Math.max(analysis.w, analysis.h) / 2
+            let bx = analysis.bx,
+                by = analysis.by,
+                br = analysis.br
+            if (s.bloomCenter) {
+                const n = toNormalised(analysis, s.bloomCenter.x, s.bloomCenter.y)
+                bx = n.x
+                by = n.y
+                br = headRadius(analysis.x, analysis.y, analysis.n, bx, by)
+            }
+            const px = bx * half + analysis.w / 2,
+                py = by * half + analysis.h / 2
+            const k = Math.max(analysis.w, analysis.h) / 180
+            ctx.strokeStyle = "rgba(255,255,255,0.85)"
+            ctx.lineWidth = 1.5 * k
+            ctx.setLineDash([4 * k, 3 * k])
+            ctx.beginPath()
+            ctx.arc(px, py, br * half, 0, Math.PI * 2)
+            ctx.stroke()
+            ctx.setLineDash([])
+            ctx.beginPath()
+            ctx.moveTo(px - 6 * k, py)
+            ctx.lineTo(px + 6 * k, py)
+            ctx.moveTo(px, py - 6 * k)
+            ctx.lineTo(px, py + 6 * k)
+            ctx.stroke()
+        }
+    }, [analysis, showMask, image, s.animation, s.bloomCenter])
+
+    // click the thumbnail to choose the bloom centre
+    const onThumbClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+        if (s.animation !== "bloom" || !analysis) return
+        const c = e.currentTarget
+        const r = c.getBoundingClientRect()
+        // the canvas is letterboxed by object-fit: contain
+        const scale = Math.min(r.width / analysis.w, r.height / analysis.h)
+        const ox = (r.width - analysis.w * scale) / 2,
+            oy = (r.height - analysis.h * scale) / 2
+        const fx = (e.clientX - r.left - ox) / (analysis.w * scale)
+        const fy = (e.clientY - r.top - oy) / (analysis.h * scale)
+        if (fx < 0 || fy < 0 || fx > 1 || fy > 1) return
+        set("bloomCenter", { x: fx, y: fy })
+        timeRef.current = 0
+        setPlaying(true)
+    }
 
     const setStyle = (style: StyleName) => setS((o) => ({ ...o, style, ...STYLE_PRESETS[style] }))
 
@@ -485,7 +539,13 @@ function App() {
                                 Example
                             </button>
                         </div>
-                        <canvas className="thumb" ref={maskRef} aria-label="Source image" />
+                        <canvas
+                            className={"thumb" + (s.animation === "bloom" ? " pick" : "")}
+                            ref={maskRef}
+                            onClick={onThumbClick}
+                            aria-label="Source image. Click to set the bloom centre."
+                            title={s.animation === "bloom" ? "Click to set where the flower blooms from" : undefined}
+                        />
                         <p className="hint">Drop, paste or upload. Works best with one subject on a plain background.</p>
                         <Toggle label="Remove background" value={s.removeBackground} onChange={(v) => set("removeBackground", v)} />
                         {s.removeBackground && (
@@ -513,8 +573,32 @@ function App() {
                     </Section>
 
                     <Section title="Motion">
+                        <Segmented<AnimationName>
+                            value={s.animation}
+                            onChange={(v) => set("animation", v)}
+                            options={[
+                                { value: "bloom", label: "Bloom" },
+                                { value: "tour", label: "Fly-through" },
+                            ]}
+                        />
+                        {s.animation === "bloom" && (
+                            <>
+                                <Slider label="Bud" value={s.bloomAmount} min={0} max={1} step={0.05} onChange={(v) => set("bloomAmount", v)} />
+                                <Row label="Centre" value={null}>
+                                    <span className="centre">
+                                        {s.bloomCenter ? "Custom" : "Auto"}
+                                        {s.bloomCenter && (
+                                            <button type="button" className="chip" onClick={(e) => { e.preventDefault(); set("bloomCenter", null) }}>
+                                                Reset
+                                            </button>
+                                        )}
+                                    </span>
+                                </Row>
+                                <p className="hint">The flower opens from a closed bud. Click the thumbnail to move the bloom centre (the dashed ring is the head).</p>
+                            </>
+                        )}
                         <Slider label="Duration" value={s.duration} min={1} max={10} step={0.1} unit="s" onChange={(v) => set("duration", v)} />
-                        <Slider label="Movement" value={s.motion} min={0} max={1.5} step={0.05} onChange={(v) => set("motion", v)} />
+                        <Slider label="Camera" value={s.motion} min={0} max={1.5} step={0.05} onChange={(v) => set("motion", v)} />
                         <Slider label="Depth" value={s.depth} min={0} max={1} step={0.05} onChange={(v) => set("depth", v)} />
                     </Section>
 

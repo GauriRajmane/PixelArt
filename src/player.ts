@@ -67,6 +67,7 @@ export function mount(
     img.onload = () => {
         if (destroyed) return
         anim = new Animator(canvas, analyze(img, s), s)
+        ;(canvas as any).__anim = anim
         fit()
         ro?.observe(canvas)
         window.addEventListener("resize", fit)
