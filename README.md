@@ -1,18 +1,22 @@
 # PixelArt: Flower page transition for Framer
 
 A pixel-grid flower (cream cells, red/yellow/blue fringes, dotted halo) that
-plays full screen as a page transition. The flower's cream then spreads until
-it covers the whole screen, and the cream breaks into square blocks that
-disappear in random order to reveal the page (a "pixel fade").
+plays full screen as a page transition. Near the end of its motion the
+flower's cream spreads until it covers the whole screen, then the page grows
+back in through the cream, square by square, out from the flower.
 
 The sequence:
 
-- **Intro** (page load): flower plays → **fill** (cream spreads out from
-  the flower over the page) → **pixel fade out** (blocks vanish at random,
-  revealing the page).
+- **Intro** (page load): the flower plays. During its last stretch of motion
+  the cream **fills** the screen, spreading out from the flower while it keeps
+  turning underneath. Before the fill finishes, the **reveal** starts: the
+  page grows in through the cream, square by square, out from the flower. This
+  is the fill in reverse (same cells, same order). The phases overlap, so
+  nothing stops abruptly.
 - **Outro** (link click): **pixel fade in** (cream blocks pop in over the
   current page) → **unfill** (cream shrinks back into the flower) → flower
-  plays → navigate → fill → pixel fade out on the new page.
+  plays → navigate → fill → **pixel fade out** (blocks vanish at random) on
+  the new page.
 
 | File | What it is |
 | --- | --- |
@@ -56,13 +60,13 @@ Properties:
 
 | Control | Default | Notes |
 | --- | --- | --- |
-| Direction | Intro | **Intro**: flower, fill, pixel fade out to reveal the page. **Outro**: pixel fade in over the page, unfill into the flower, play, fire *On Complete*, and stay covering the page. |
+| Direction | Intro | **Intro**: flower, then fill and page reveal (overlapping). **Outro**: pixel fade in over the page, unfill into the flower, play, fire *On Complete*, and stay covering the page. |
 | Auto Play | on | When off, the component waits for `triggerFlowerTransition()` (exported) or a `flowertransition:play` event on `window`. |
 | Once / Session | off | Intro only. Plays on the first page view of the browser session (`sessionStorage`, wrapped in try/catch). |
 | Duration | 1.8 s | Length of the flower animation. The ~6 s reference (rest, push-in, sweep, rest) is time-scaled to fit, not cut. |
-| Fill | 0.5 s | How long the cream takes to spread from the flower over the whole page. Each grid cell grows into a solid square, starting with the ones in the flower and moving outward by distance with a little random jitter. |
-| Pixel Fade | 0.6 s | How long the blocks take to disappear (intro) or appear (outro). Each block switches at its own random moment, instantly rather than fading. |
-| Fade Pixels | 24 | Block columns across the screen for the pixel fade. The blocks are square. Lower numbers give chunkier blocks. |
+| Fill | 0.5 s | How long the cream takes to spread from the flower over the whole page. Each grid cell grows into a solid square, starting with the ones in the flower and moving outward by distance with a little random jitter. In the intro it runs during the last part of the flower's motion (up to 35% of Duration), so the flower is still moving when the cream covers it. |
+| Reveal / Fade | 0.8 s | **Intro**: how long the page takes to grow back in through the cream (it starts when the fill is 70% done). **Link transitions**: how long the pixel blocks take to appear or disappear. Each block switches at its own random moment, instantly rather than fading. |
+| Fade Pixels | 24 | Block columns across the screen for the link-transition pixel fade. The blocks are square. Lower numbers give chunkier blocks. |
 | Style | Fine | **Fine (halftone)**: a dense grid of small square dots, sized by brightness, sampled from a smooth reconstruction of the flower (see *Fine style* below). **Classic**: the reference's coarse cells (~56 across) with their outlines and hollow halo squares. |
 | Columns | 128 | Fine style: dot columns across the viewport in landscape. Dots stay square and their size follows the viewport width. Higher means smaller, more numerous dots. |
 | Columns (Portrait) | 64 | Fine style: dot columns when the viewport is taller than it is wide. |
@@ -133,7 +137,7 @@ Open `demo.html` directly in a browser. No server is needed.
 
 - **Replay intro** / **Play outro** buttons. The outro also switches the fake
   page between "Home" and "About" to show the navigate-and-reveal step.
-- A style switch (Fine / Classic), sliders for duration, fill, pixel fade,
+- A style switch (Fine / Classic), sliders for duration, fill, reveal/fade,
   fade pixels, columns
   (landscape and portrait) and dot size, and colour pickers.
 - A **scrubber** that draws any moment of the baked animation, useful for

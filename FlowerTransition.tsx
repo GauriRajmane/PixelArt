@@ -31,7 +31,10 @@ export type RenderStyle = "fine" | "classic"
 export interface FlowerSettings {
     /** Seconds the flower animation takes (the reference is time-scaled). */
     duration: number
-    /** Seconds for the pixel fade (blocks dissolving / appearing). */
+    /**
+     * Seconds for the page reveal at the end of the intro (the page grows in
+     * through the cream), and for the pixel-block fade of link transitions.
+     */
     fadeDuration: number
     /** Seconds for the cream to spread from the flower over the whole page. */
     fillDuration: number
@@ -57,7 +60,7 @@ export interface FlowerSettings {
 
 export const DEFAULT_SETTINGS: FlowerSettings = {
     duration: 1.8,
-    fadeDuration: 0.6,
+    fadeDuration: 0.8,
     fillDuration: 0.5,
     pixelColumns: 24,
     renderStyle: "fine",
@@ -1763,16 +1766,26 @@ class FlowerRenderer {
         return d
     }
 
-    /** Cream squares growing over the flower: fill 0 (none) .. 1 (solid). */
-    private drawFill(t: number, fill: number) {
-        const ctx = this.ctx!
+    /** Fill timing map for the flower pose at time t. */
+    private delaysAt(t: number): Float32Array {
         const [k, k2, u] = this.keyPair(t)
-        const d = this.delaysFor(u < 0.5 ? k : k2)
+        return this.delaysFor(u < 0.5 ? k : k2)
+    }
+
+    /**
+     * Squares growing cell by cell, out from the flower: amount 0 (none) ..
+     * 1 (solid). Painted in cream (fill), or punched out of the canvas
+     * (erase) so the page shows through: the inverse of the fill.
+     */
+    private drawCells(d: Float32Array, amount: number, erase = false) {
+        const ctx = this.ctx!
+        const fill = amount
         const fx = this.fx!,
             fy = this.fy!
         const pitch = this.fine
         const SPAN = 0.35 // each cell grows over this share of the fill
-        ctx.fillStyle = this.settings.creamColor
+        ctx.fillStyle = erase ? "#000" : this.settings.creamColor
+        if (erase) ctx.globalCompositeOperation = "destination-out"
         ctx.beginPath()
         for (let j = 0; j < fy.n; j++) {
             const cy = fy.off + (j + 0.5) * pitch
@@ -1798,6 +1811,7 @@ class FlowerRenderer {
             }
         }
         ctx.fill()
+        if (erase) ctx.globalCompositeOperation = "source-over"
     }
 
     /**
@@ -1931,7 +1945,27 @@ class FlowerRenderer {
             return
         }
         this.drawFlower(t)
-        if (fill > 0) this.drawFill(t, fill)
+        if (fill > 0) this.drawCells(this.delaysAt(t), fill)
+    }
+
+    /**
+     * Intro ending: the flower at `t` (still moving), the cream `fill`
+     * spreading over it, and the page growing back in through the cream
+     * (`reveal`), both out from the flower pose at `poseT`.
+     */
+    drawIntroEnd(t: number, fill: number, reveal: number, poseT: number) {
+        const ctx = this.ctx
+        if (!ctx) return
+        const d = this.delaysAt(poseT)
+        if (fill >= 1) {
+            ctx.fillStyle = this.settings.creamColor
+            ctx.fillRect(0, 0, this.w, this.h)
+        } else {
+            this.drawFlower(t)
+            if (fill > 0) this.drawCells(d, fill)
+        }
+        if (reveal >= 1) ctx.clearRect(0, 0, this.w, this.h)
+        else if (reveal > 0) this.drawCells(d, reveal, true)
     }
 
     private drawFlower(t: number) {
@@ -2042,6 +2076,12 @@ function prefersReducedMotion(): boolean {
     }
 }
 
+/** Clamped, gently accelerating ramp (fill spreads faster as it grows). */
+const smoothstepIn = (x: number) => {
+    const c = Math.max(0, Math.min(1, x))
+    return c * (0.6 + 0.4 * c)
+}
+
 const smooth = (x: number) => {
     const c = Math.max(0, Math.min(1, x))
     return c * c * (3 - 2 * c)
@@ -2092,7 +2132,15 @@ export function runTransition(
                   { kind: "fill", dur: fill },
                   { kind: "pixelOut", dur: fade },
               ]
-    const total = phases.reduce((a, p) => a + p.dur, 0)
+    let total = phases.reduce((a, p) => a + p.dur, 0)
+
+    // Intro: overlapping instead of back to back, so nothing stops dead.
+    // The cream starts spreading during the flower's last stretch of motion
+    // (it keeps turning underneath), and the page starts growing back in
+    // through the cream before the fill has finished.
+    const fillStart = play - Math.min(fill, play * 0.35)
+    const revealStart = fillStart + fill * 0.7
+    if (!reduced && mode === "intro") total = revealStart + fade
 
     // An intro is opaque (background colour) from its first paint; an outro
     // starts invisible and builds up over the page.
@@ -2145,7 +2193,19 @@ export function runTransition(
             }
             p = Math.max(0, Math.min(1, p))
 
-            if (!animated) {
+            if (animated && mode === "intro") {
+                renderer!.drawIntroEnd(
+                    Math.min(1, e / play) * end,
+                    smoothstepIn((e - fillStart) / fill),
+                    Math.max(0, Math.min(1, (e - revealStart) / fade)),
+                    (fillStart / play) * end
+                )
+                if (first) {
+                    root.style.background = "transparent"
+                    root.style.opacity = "1"
+                    first = false
+                }
+            } else if (!animated) {
                 root.style.opacity = String(ph.kind === "fadeIn" ? smooth(p) : 1 - smooth(p))
             } else {
                 const r = renderer!
@@ -2495,11 +2555,11 @@ addPropertyControls(FlowerTransition, {
         max: 2,
         step: 0.05,
         unit: "s",
-        description: "Cream spreading from the flower over the page.",
+        description: "Cream spreading from the flower over the page (starts while the flower is still moving).",
     },
     fadeDuration: {
         type: ControlType.Number,
-        title: "Pixel Fade",
+        title: "Reveal / Fade",
         defaultValue: DEFAULT_SETTINGS.fadeDuration,
         min: 0.1,
         max: 2,
