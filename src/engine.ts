@@ -941,7 +941,7 @@ export class Animator {
         for (let o = 0; o < this.cov.length; o++) if (this.cov[o] > 0.5) m.push(this.acc[o] / this.cov[o])
         m.sort((p, q) => p - q)
         const ref = m[Math.floor(m.length * 0.95)] || 1
-        const target = this.s.style === "xray" ? 2 : 3
+        const target = this.s.style === "xray" ? 2.8 : 3
         this.gainCache = target / Math.max(1e-3, ref)
         return this.gainCache
     }
@@ -1169,8 +1169,8 @@ export class Animator {
                 fill = this.color(key, () => {
                     const t = (key + 0.5) / 32
                     // steep curve: dim bodies, glowing edges and veins
-                    const m = Math.min(1, Math.pow(t, 1.1) * 1.3)
-                    const wt = Math.max(0, (t - 0.72) / 0.28) * 0.55
+                    const m = Math.min(1, Math.pow(t, 0.9) * 1.25)
+                    const wt = Math.max(0, (t - 0.6) / 0.4) * 0.6
                     const c = [0, 1, 2].map((ch) => {
                         const base = bg[ch] + (tint[ch] - bg[ch]) * m
                         return base + (255 - base) * wt

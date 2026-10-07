@@ -75,7 +75,8 @@ Settings are remembered in your browser between visits.
      are median-smoothed so a subject touching an edge doesn't leak in, then
      blended across the image.
    - **Subject mask:** a soft threshold on the distance from that gradient.
-   - **Edges:** Sobel on the masked brightness.
+   - **Edges:** inner detail (Sobel on the brightness, normalised within the
+     subject: petal edges and veins) plus the silhouette (Sobel on the mask).
    - **Depth:** the distance from the subject's edge (chamfer transform), so
      the middle of the subject bulges towards the camera.
    - **Points:** every subject pixel becomes a 3D point with an X-ray
