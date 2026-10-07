@@ -1,0 +1,19 @@
+{
+  "name": "flower-transition",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Pixel-grid flower page transition for Framer",
+  "scripts": {
+    "bake": "python3 -I tools/bake.py",
+    "build:demo": "esbuild demo/demo.tsx --bundle --minify --format=iife --target=es2019 --alias:framer=./demo/framer-stub.ts --define:process.env.NODE_ENV=\\\"production\\\" --outfile=demo/demo.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "esbuild": "^0.24.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.6.0"
+  }
+}

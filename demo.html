@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Flower Transition Demo</title>
+<style>
+  :root { --bg: #f4f1ea; --fg: #1b1a17; --muted: #6b675e; --panel: rgba(20, 20, 24, 0.92); }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, sans-serif; }
+  .page { max-width: 760px; margin: 0 auto; padding: 32px 16px 120px; }
+  nav { display: flex; gap: 16px; margin-bottom: 64px; }
+  nav a { color: var(--fg); text-decoration: none; opacity: .55; }
+  nav a.on { opacity: 1; text-decoration: underline; }
+  h1 { font-size: clamp(48px, 10vw, 112px); line-height: 1; margin: 0 0 16px; letter-spacing: -.03em; }
+  .muted { color: var(--muted); }
+  /* above the overlay so the controls stay usable while tuning */
+  .panel { position: fixed; right: 12px; bottom: 12px; z-index: 2147483600; width: min(340px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px); overflow: auto; background: var(--panel); color: #eee; border-radius: 10px;
+    padding: 12px; font-size: 13px; }
+  .panel.closed { width: auto; }
+  .panel header { display: flex; align-items: center; gap: 8px; }
+  .panel header strong { flex: 1; }
+  .fps { font-variant-numeric: tabular-nums; color: #9f9; }
+  .buttons { display: flex; gap: 8px; margin: 10px 0; }
+  button { font: inherit; padding: 6px 10px; border-radius: 6px; border: 0; background: #e8e8d8; color: #111; cursor: pointer; }
+  button.ghost { background: transparent; color: #ccc; border: 1px solid #555; }
+  .row { display: grid; grid-template-columns: 92px 1fr 64px; align-items: center; gap: 8px; margin: 4px 0; }
+  .row output { text-align: right; font-variant-numeric: tabular-nums; color: #bbb; }
+  .row input[type=color] { width: 100%; height: 22px; border: 0; background: none; padding: 0; }
+  .scrub { margin-top: 10px; }
+  .scrub canvas { width: 100%; aspect-ratio: 1056 / 540; display: block; border-radius: 4px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="demo/demo.js"></script>
+</body>
+</html>
